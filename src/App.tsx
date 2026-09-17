@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import * as ort from 'onnxruntime-web';
 import { MODELS, ModelConfig, checkWebGPUAvailability } from './utils/modelManager';
 import { separateAudio, SeparationResult, SeparationProgress } from './utils/separation';
 import { transcribeAudio, downloadMidi, TranscriptionProgress } from './utils/transcription';
@@ -36,15 +35,10 @@ function App() {
   const [originalUrl, setOriginalUrl] = useState<string>('');
   const [activeProvider, setActiveProvider] = useState<string>('');
   
-  const sessionRef = useRef<ort.InferenceSession | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
     checkWebGPUAvailability().then(setWebgpuAvailable);
-    
-    ort.env.wasm.numThreads = 1;
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
-    ort.env.logLevel = 'warning';
   }, []);
 
   const getAudioContext = useCallback(() => {
@@ -78,44 +72,24 @@ function App() {
   const handleSeparate = useCallback(async () => {
     if (!audioBuffer) return;
     
-    setState('loading-model');
+    setState('processing');
     setErrorMsg('');
     setResults([]);
     setMidiData(null);
-    setActiveProvider('');
+    setActiveProvider('demucs-web');
     setProgress({
-      modelProgress: 0,
-      modelMessage: 'Starting download...',
+      modelProgress: 100,
+      modelMessage: 'Starting separation...',
       separationProgress: null,
       transcriptionProgress: null,
     });
 
     try {
-      const { downloadModel, createSession } = await import('./utils/modelManager');
-      await downloadModel(selectedModel.url, (loaded, total) => {
-        const progress = total > 0 ? (loaded / total) * 100 : 0;
-        setProgress(prev => ({
-          ...prev,
-          modelProgress: progress,
-          modelMessage: `Downloading model... ${Math.round(progress)}%`,
-        }));
-      });
-
-      const { session, provider } = await createSession(selectedModel, webgpuAvailable);
-      sessionRef.current = session;
-      setActiveProvider(provider);
-
-      setState('processing');
-      setProgress(prev => ({
-        ...prev,
-        modelProgress: 100,
-        modelMessage: `Model loaded! Using ${provider.toUpperCase()}. Starting separation...`,
-      }));
-
+      // demucs-web handles model loading internally
       const separationResults = await separateAudio(
         audioBuffer,
         selectedModel,
-        session,
+        null as any, // session not needed, demucs-web manages it
         (sepProgress) => {
           setProgress(prev => ({
             ...prev,
@@ -131,7 +105,7 @@ function App() {
       setErrorMsg(`Separation failed: ${err instanceof Error ? err.message : String(err)}`);
       setState('error');
     }
-  }, [audioBuffer, selectedModel, webgpuAvailable]);
+  }, [audioBuffer, selectedModel]);
 
   const handleTranscribe = useCallback(async () => {
     const vocalsResult = results.find(r => r.stemName === 'Vocals');
