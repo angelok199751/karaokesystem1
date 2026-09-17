@@ -5,37 +5,38 @@
 ## ✨ Возможности
 
 - 🔒 **100% приватность** — вся обработка происходит локально в браузере
-- 🧠 **BS-Roformer-SW** — state-of-the-art модель разделения на 6 stems
-- 🎵 **6 дорожек** — Bass, Drums, Other, Vocals, Guitar, Piano
+- 🧠 **UVR-MDX-NET** — быстрая и надёжная модель разделения вокала
+- 🎵 **2 дорожки** — Vocals и Instrumental
 - 🌐 **WebGPU + WASM** — использует WebGPU при наличии, fallback на WASM
 - 💾 **Кэширование** — модели кэшируются в CacheStorage после первой загрузки
 - ⬇️ **Экспорт** — скачивание результатов в WAV формате
 
-## 🧠 Модель
+## 🧠 Модели
 
-Используется **BS-Roformer-SW** — state-of-the-art модель разделения аудио:
+Используются **UVR-MDX-NET** — проверенные модели для разделения вокала:
 
 | Модель | Размер | Описание |
 |--------|--------|----------|
-| BS-Roformer-SW FP16 | 336 MB | Рекомендуемая, лучшее качество (Vocals + Instrumental) |
-| BS-Roformer-SW FP32 | 669 MB | Fallback, если FP16 не работает (Vocals + Instrumental) |
+| UVR-MDX-NET 9482 | 28 MB | Быстрая, хорошее качество |
+| UVR-MDX-NET Voc_FT | 64 MB | Высокое качество |
 
-### Выходы модели (2 stems):
+### Выходы (2 stems):
 1. 🎤 **Vocals** — вокал
-2. 🎸 **Instrumental** — всё остальное (бас, ударные, гитара, пианино и другие инструменты)
+2. 🎸 **Instrumental** — всё остальное
 
-### Источник модели:
-- **HuggingFace**: [elicwhite/bs-roformer-sw-6stem-onnx](https://huggingface.co/elicwhite/bs-roformer-sw-6stem-onnx)
+### Источник моделей:
+- **HuggingFace**: [Blane187/all_public_uvr_models](https://huggingface.co/Blane187/all_public_uvr_models)
 - **Лицензия**: MIT
-- **Архитектура**: Band-Split RoFormer от ByteDance AI Labs
-- **Специально подготовлена** для работы в браузере через onnxruntime-web
+- **Архитектура**: MDX-Net от kuielab
+- **Оптимизированы** для работы в браузере через onnxruntime-web
 
 ## 🌐 Загрузка модели
 
-Модель загружается с HuggingFace. Если HuggingFace заблокирован в вашем регионе:
+Модели загружаются с HuggingFace (28-64 MB). Если HuggingFace заблокирован в вашем регионе:
 - Используйте VPN для первой загрузки
 - После первой загрузки модель кэшируется в браузере
 - Повторные запуски используют кэш (мгновенно)
+- Есть fallback на hf-mirror.com
 
 ## 🌐 Поддержка браузеров
 
@@ -111,30 +112,31 @@ src/
 
 ## 📊 Технические детали
 
-- **Модель:** BS-Roformer-SW (Band-Split RoFormer)
+- **Модель:** UVR-MDX-NET (MDX-Net)
 - **Вход:** Стерео аудио (MP3, WAV, OGG, FLAC, M4A, AAC, WebM)
 - **Выход:** 2 WAV файла (vocals, instrumental)
-- **STFT:** n_fft=2048, hop_length=512, hann window, center=True
-- **Чанк:** 176400 samples (4s @ 44.1kHz, T=345 frames)
-- **Overlap:** 25% overlap-add для плавности
+- **STFT:** n_fft=768-1024, hop_length=384-512, hann window, center=True
+- **Чанк:** 262144 samples (~6s @ 44.1kHz)
+- **Overlap:** 50% overlap-add для плавности
 
 ## 🔄 Как это работает
 
 1. **Загрузка аудио** — файл декодируется через Web Audio API
 2. **Загрузка модели** — ONNX модель скачивается с HuggingFace и кэшируется
-3. **Разбиение на чанки** — аудио разбивается на 4-секундные сегменты с 25% перекрытием
-4. **STFT** — каждый чанк конвертируется в спектрограмму (комплексные числа)
-5. **Инференс** — спектрограммы подаются в модель, которая возвращает маски для всех stems
-6. **iSTFT** — маскированные спектрограммы конвертируются обратно в аудио
-7. **Объединение** — вокал (stem 3) и инструментал (все остальные stems объединены)
+3. **Разбиение на чанки** — аудио разбивается на ~6-секундные сегменты с 50% перекрытием
+4. **STFT** — каждый чанк конвертируется в magnitude spectrogram
+5. **Инференс** — spectrogram подаётся в модель, которая возвращает маску вокала
+6. **Применение маски** — маска применяется к stereo STFT
+7. **iSTFT** — маскированные спектрограммы конвертируются обратно в аудио
 8. **Overlap-add** — чанки собираются обратно с учётом перекрытий
-9. **Экспорт** — результаты кодируются в WAV для воспроизведения/скачивания
+9. **Instrumental** — вычисляется как original - vocals
+10. **Экспорт** — результаты кодируются в WAV для воспроизведения/скачивания
 
 ## ⚡ Производительность
 
-- **WebGPU:** ~0.5-1x realtime (зависит от GPU)
-- **WASM:** ~2-5x realtime (зависит от CPU)
-- **Первая загрузка:** 336 MB (далее из кэша)
+- **WebGPU:** ~0.3-0.7x realtime (зависит от GPU)
+- **WASM:** ~1-3x realtime (зависит от CPU)
+- **Первая загрузка:** 28-64 MB (далее из кэша)
 
 ## 🐛 Известные ограничения
 
@@ -150,8 +152,7 @@ MIT
 
 ## 🙏 Благодарности
 
-- **Модель:** [elicwhite/bs-roformer-sw-6stem-onnx](https://huggingface.co/elicwhite/bs-roformer-sw-6stem-onnx)
-- **Архитектура:** [lucidrains/BS-RoFormer](https://github.com/lucidrains/BS-RoFormer)
-- **Обучение:** [ZFTurbo/Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)
+- **Модели:** [Blane187/all_public_uvr_models](https://huggingface.co/Blane187/all_public_uvr_models)
+- **Архитектура:** [kuielab/MDX-Net](https://github.com/kuielab) (Music Demixing Challenge)
+- **UVR Project:** [Anjok07/ultimatevocalremovergui](https://github.com/Anjok07/ultimatevocalremovergui)
 - **ONNX Runtime:** [onnxruntime-web](https://github.com/microsoft/onnxruntime)
-- **Оригинальная статья:** [Band-Split RoFormer](https://arxiv.org/abs/2309.02612) от ByteDance AI Labs

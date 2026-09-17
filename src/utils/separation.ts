@@ -1,6 +1,6 @@
 /**
- * Audio separation using BS-Roformer-SW 6-stem ONNX model
- * Specially prepared for browser inference via onnxruntime-web
+ * Audio separation using UVR-MDX-NET ONNX models
+ * Lightweight vocal separation (28-64 MB)
  */
 import * as ort from 'onnxruntime-web';
 import { ModelConfig } from './modelManager';
@@ -62,7 +62,7 @@ function fftInPlace(re: Float32Array, im: Float32Array, N: number): void {
   }
 }
 
-/** Real FFT with center padding (matches PyTorch stft center=True) */
+/** Real FFT with center padding */
 function stftCenter(signal: Float32Array, nFft: number, hop: number, win: Float32Array): { real: Float32Array[]; imag: Float32Array[]; numFrames: number } {
   const nFreq = nFft / 2 + 1;
   const padLength = nFft / 2;
@@ -150,8 +150,7 @@ function istftCenter(real: Float32Array[], imag: Float32Array[], nFft: number, h
 // ── Prepare model input ────────────────────────────────────────────────────
 
 interface ChunkInput {
-  specReal: Float32Array;  // [1, 2, 1025, T]
-  specImag: Float32Array;  // [1, 2, 1025, T]
+  magnitude: Float32Array;  // [1, 1, n_freq, n_frames]
   numFrames: number;
   stftL: { real: Float32Array[]; imag: Float32Array[] };
   stftR: { real: Float32Array[]; imag: Float32Array[] };
@@ -166,28 +165,33 @@ function prepareChunkInput(
 ): ChunkInput {
   const nFreq = nFft / 2 + 1;
   
-  // STFT for both channels
+  // Mix to mono for magnitude computation
+  const mono = new Float32Array(left.length);
+  for (let i = 0; i < left.length; i++) {
+    mono[i] = (left[i] + right[i]) / 2;
+  }
+  
+  // STFT for mono
+  const stftMono = stftCenter(mono, nFft, hop, win);
+  
+  // Also compute STFT for stereo (for later application)
   const stftL = stftCenter(left, nFft, hop, win);
   const stftR = stftCenter(right, nFft, hop, win);
   
-  const numFrames = stftL.numFrames;
+  const numFrames = stftMono.numFrames;
   
-  // Create tensors [1, 2, 1025, T]
-  const specReal = new Float32Array(2 * nFreq * numFrames);
-  const specImag = new Float32Array(2 * nFreq * numFrames);
+  // Compute magnitude [1, 1, n_freq, n_frames]
+  const magnitude = new Float32Array(nFreq * numFrames);
   
   for (let t = 0; t < numFrames; t++) {
     for (let f = 0; f < nFreq; f++) {
-      // Channel 0 (left)
-      specReal[0 * nFreq * numFrames + f * numFrames + t] = stftL.real[t][f];
-      specImag[0 * nFreq * numFrames + f * numFrames + t] = stftL.imag[t][f];
-      // Channel 1 (right)
-      specReal[1 * nFreq * numFrames + f * numFrames + t] = stftR.real[t][f];
-      specImag[1 * nFreq * numFrames + f * numFrames + t] = stftR.imag[t][f];
+      const re = stftMono.real[t][f];
+      const im = stftMono.imag[t][f];
+      magnitude[f * numFrames + t] = Math.sqrt(re * re + im * im);
     }
   }
   
-  return { specReal, specImag, numFrames, stftL, stftR };
+  return { magnitude, numFrames, stftL, stftR };
 }
 
 // ── Apply model output and iSTFT ───────────────────────────────────────────
@@ -197,54 +201,50 @@ interface StemAudio {
   right: Float32Array;
 }
 
-function reconstructStems(
-  outSpecReal: Float32Array,
-  outSpecImag: Float32Array,
+function applyMaskAndReconstruct(
+  mask: Float32Array,
+  stftL: { real: Float32Array[]; imag: Float32Array[] },
+  stftR: { real: Float32Array[]; imag: Float32Array[] },
   numFrames: number,
   win: Float32Array,
   nFft: number,
   hop: number,
-  numStems: number,
   originalLength: number
-): StemAudio[] {
+): StemAudio {
   const nFreq = nFft / 2 + 1;
-  const stems: StemAudio[] = [];
   
-  for (let stem = 0; stem < numStems; stem++) {
-    // Extract this stem's spectrograms [2, 1025, T]
-    const stemRealL: Float32Array[] = [];
-    const stemImagL: Float32Array[] = [];
-    const stemRealR: Float32Array[] = [];
-    const stemImagR: Float32Array[] = [];
+  // Apply mask to stereo STFT
+  const maskedRealL: Float32Array[] = [];
+  const maskedImagL: Float32Array[] = [];
+  const maskedRealR: Float32Array[] = [];
+  const maskedImagR: Float32Array[] = [];
+  
+  for (let t = 0; t < numFrames; t++) {
+    const mReL = new Float32Array(nFreq);
+    const mImL = new Float32Array(nFreq);
+    const mReR = new Float32Array(nFreq);
+    const mImR = new Float32Array(nFreq);
     
-    for (let t = 0; t < numFrames; t++) {
-      const reL = new Float32Array(nFreq);
-      const imL = new Float32Array(nFreq);
-      const reR = new Float32Array(nFreq);
-      const imR = new Float32Array(nFreq);
+    for (let f = 0; f < nFreq; f++) {
+      const m = mask[f * numFrames + t];
       
-      for (let f = 0; f < nFreq; f++) {
-        const baseIdx = stem * 2 * nFreq * numFrames + f * numFrames + t;
-        reL[f] = outSpecReal[baseIdx];
-        imL[f] = outSpecImag[baseIdx];
-        reR[f] = outSpecReal[baseIdx + nFreq * numFrames];
-        imR[f] = outSpecImag[baseIdx + nFreq * numFrames];
-      }
-      
-      stemRealL.push(reL);
-      stemImagL.push(imL);
-      stemRealR.push(reR);
-      stemImagR.push(imR);
+      mReL[f] = stftL.real[t][f] * m;
+      mImL[f] = stftL.imag[t][f] * m;
+      mReR[f] = stftR.real[t][f] * m;
+      mImR[f] = stftR.imag[t][f] * m;
     }
     
-    // iSTFT for both channels
-    const left = istftCenter(stemRealL, stemImagL, nFft, hop, win, originalLength);
-    const right = istftCenter(stemRealR, stemImagR, nFft, hop, win, originalLength);
-    
-    stems.push({ left, right });
+    maskedRealL.push(mReL);
+    maskedImagL.push(mImL);
+    maskedRealR.push(mReR);
+    maskedImagR.push(mImR);
   }
   
-  return stems;
+  // iSTFT for both channels
+  const left = istftCenter(maskedRealL, maskedImagL, nFft, hop, win, originalLength);
+  const right = istftCenter(maskedRealR, maskedImagR, nFft, hop, win, originalLength);
+  
+  return { left, right };
 }
 
 // ── Resample ────────────────────────────────────────────────────────────────
@@ -277,7 +277,6 @@ export async function separateAudio(
   onProgress?: (progress: SeparationProgress) => void
 ): Promise<SeparationResult[]> {
   const originalSampleRate = audioBuffer.sampleRate;
-  const numStems = modelConfig.stems.length;
   
   onProgress?.({ stage: 'preparing', progress: 0, message: 'Preparing audio...' });
 
@@ -305,15 +304,10 @@ export async function separateAudio(
     starts.push(s);
   }
 
-  // Accumulators for overlap-add (for each stem)
-  const stemAccumL: Float32Array[] = [];
-  const stemAccumR: Float32Array[] = [];
+  // Accumulators for overlap-add
+  const vocalsL = new Float32Array(totalSamples);
+  const vocalsR = new Float32Array(totalSamples);
   const count = new Float32Array(totalSamples);
-  
-  for (let s = 0; s < numStems; s++) {
-    stemAccumL.push(new Float32Array(totalSamples));
-    stemAccumR.push(new Float32Array(totalSamples));
-  }
 
   const t0 = performance.now();
 
@@ -329,37 +323,30 @@ export async function separateAudio(
     cR.set(procRight.subarray(start, end));
 
     // STFT & prepare input
-    const { specReal, specImag, numFrames } = prepareChunkInput(
+    const { magnitude, numFrames, stftL, stftR } = prepareChunkInput(
       cL, cR, win, modelConfig.nFft, modelConfig.hopLength
     );
 
     // Run ONNX inference
-    const inputReal = new ort.Tensor('float32', specReal, [1, 2, 1025, numFrames]);
-    const inputImag = new ort.Tensor('float32', specImag, [1, 2, 1025, numFrames]);
+    const nFreq = modelConfig.nFft / 2 + 1;
+    const inputTensor = new ort.Tensor('float32', magnitude, [1, 1, nFreq, numFrames]);
     
     const feeds: Record<string, ort.Tensor> = {};
-    feeds[modelConfig.inputNames[0]] = inputReal;
-    feeds[modelConfig.inputNames[1]] = inputImag;
+    feeds[modelConfig.inputName] = inputTensor;
     
     const results = await session.run(feeds);
-    
-    const outSpecReal = results[modelConfig.outputNames[0]].data as Float32Array;
-    const outSpecImag = results[modelConfig.outputNames[1]].data as Float32Array;
+    const mask = results[modelConfig.outputName].data as Float32Array;
 
-    // Reconstruct stems
-    const stems = reconstructStems(
-      outSpecReal, outSpecImag, numFrames, win,
-      modelConfig.nFft, modelConfig.hopLength, numStems, modelConfig.chunkSamples
+    // Apply mask and reconstruct vocals
+    const vocals = applyMaskAndReconstruct(
+      mask, stftL, stftR, numFrames, win,
+      modelConfig.nFft, modelConfig.hopLength, modelConfig.chunkSamples
     );
 
     // Accumulate with overlap
-    for (let s = 0; s < numStems; s++) {
-      for (let i = 0; i < chunkLen; i++) {
-        stemAccumL[s][start + i] += stems[s].left[i];
-        stemAccumR[s][start + i] += stems[s].right[i];
-      }
-    }
     for (let i = 0; i < chunkLen; i++) {
+      vocalsL[start + i] += vocals.left[i];
+      vocalsR[start + i] += vocals.right[i];
       count[start + i] += 1;
     }
 
@@ -383,40 +370,21 @@ export async function separateAudio(
   }
 
   // Average overlaps
-  for (let s = 0; s < numStems; s++) {
-    for (let i = 0; i < totalSamples; i++) {
-      if (count[i] > 0) {
-        stemAccumL[s][i] /= count[i];
-        stemAccumR[s][i] /= count[i];
-      }
+  for (let i = 0; i < totalSamples; i++) {
+    if (count[i] > 0) {
+      vocalsL[i] /= count[i];
+      vocalsR[i] /= count[i];
     }
   }
 
-  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Combining stems...' });
+  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Building instrumental...' });
 
-  // Combine stems: Vocals (stem 3) and Instrumental (all others combined)
-  // Model outputs: 0=bass, 1=drums, 2=other, 3=vocals, 4=guitar, 5=piano
-  const vocalsL = new Float32Array(totalSamples);
-  const vocalsR = new Float32Array(totalSamples);
+  // Build instrumental = original - vocals
   const instrL = new Float32Array(totalSamples);
   const instrR = new Float32Array(totalSamples);
-
   for (let i = 0; i < totalSamples; i++) {
-    // Vocals = stem 3
-    vocalsL[i] = stemAccumL[3][i] / (count[i] || 1);
-    vocalsR[i] = stemAccumR[3][i] / (count[i] || 1);
-
-    // Instrumental = sum of all other stems (0,1,2,4,5)
-    let instrSumL = 0;
-    let instrSumR = 0;
-    for (let s = 0; s < numStems; s++) {
-      if (s !== 3) { // Skip vocals
-        instrSumL += stemAccumL[s][i];
-        instrSumR += stemAccumR[s][i];
-      }
-    }
-    instrL[i] = instrSumL / (count[i] || 1);
-    instrR[i] = instrSumR / (count[i] || 1);
+    instrL[i] = procLeft[i] - vocalsL[i];
+    instrR[i] = procRight[i] - vocalsR[i];
   }
 
   onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Resampling and encoding...' });

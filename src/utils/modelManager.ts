@@ -1,6 +1,6 @@
 /**
- * Model manager for BS-Roformer-SW 6-stem ONNX model
- * Specially prepared for browser inference via onnxruntime-web
+ * Model manager for UVR-MDX-NET models
+ * Lightweight vocal separation models (28-80 MB)
  */
 import * as ort from 'onnxruntime-web';
 
@@ -16,52 +16,48 @@ export interface ModelConfig {
   nFft: number;
   hopLength: number;
   winLength: number;
-  chunkSamples: number; // 176400 = 4s @ 44.1kHz
-  chunkFrames: number;  // T = 345
-  overlap: number;      // 25% overlap-add
+  chunkSamples: number;
+  overlap: number;
   // Model I/O
-  inputNames: [string, string];  // [spec_real, spec_imag]
-  outputNames: [string, string]; // [out_spec_real, out_spec_imag]
+  inputName: string;
+  outputName: string;
 }
 
-// HuggingFace URLs (try mirror first for Russia)
-const HF_MIRROR = 'https://hf-mirror.com';
+// HuggingFace URLs
 const HF_BASE = 'https://huggingface.co';
 
 export const MODELS: ModelConfig[] = [
   {
-    id: 'bs-roformer-sw-fp16',
-    name: 'BS-Roformer-SW FP16 (Recommended)',
-    description: 'Vocals + Instrumental separation. 336MB. Best quality/speed.',
-    url: `${HF_BASE}/elicwhite/bs-roformer-sw-6stem-onnx/resolve/main/bs_roformer_sw_6stem_fp16.onnx`,
-    size: '~336 MB',
-    stems: ['Vocals', 'Instrumental'], // Simplified output
+    id: 'uvr-mdxnet-9482',
+    name: 'UVR-MDX-NET 9482 (Fast)',
+    description: 'Fast vocal separation. 28MB. Good balance of speed and quality.',
+    url: `${HF_BASE}/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_9482.onnx`,
+    size: '~28 MB',
+    stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 2048,
-    hopLength: 512,
-    winLength: 2048,
-    chunkSamples: 176400, // 4s @ 44.1kHz
-    chunkFrames: 345,     // T = 345
-    overlap: 4,           // 25% overlap
-    inputNames: ['spec_real', 'spec_imag'],
-    outputNames: ['out_spec_real', 'out_spec_imag'],
+    nFft: 768,
+    hopLength: 384,
+    winLength: 768,
+    chunkSamples: 262144, // ~6s @ 44.1kHz
+    overlap: 2,
+    inputName: 'input',
+    outputName: 'output',
   },
   {
-    id: 'bs-roformer-sw-fp32',
-    name: 'BS-Roformer-SW FP32 (Fallback)',
-    description: 'Same model, fp32 weights. 669MB. Use if fp16 fails.',
-    url: `${HF_BASE}/elicwhite/bs-roformer-sw-6stem-onnx/resolve/main/bs_roformer_sw_6stem_fp32.onnx`,
-    size: '~669 MB',
-    stems: ['Vocals', 'Instrumental'], // Simplified output
+    id: 'uvr-mdxnet-voc-ft',
+    name: 'UVR-MDX-NET Voc_FT (Best Quality)',
+    description: 'High-quality vocal separation. 64MB. Best results.',
+    url: `${HF_BASE}/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx`,
+    size: '~64 MB',
+    stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 2048,
+    nFft: 1024,
     hopLength: 512,
-    winLength: 2048,
-    chunkSamples: 176400,
-    chunkFrames: 345,
-    overlap: 4,
-    inputNames: ['spec_real', 'spec_imag'],
-    outputNames: ['out_spec_real', 'out_spec_imag'],
+    winLength: 1024,
+    chunkSamples: 262144,
+    overlap: 2,
+    inputName: 'input',
+    outputName: 'output',
   },
 ];
 
@@ -103,12 +99,12 @@ export async function downloadModel(
     return cached;
   }
 
-  // Try multiple URLs (mirror + direct)
+  // Try multiple URLs (direct + mirror)
   const urlsToTry: string[] = [url];
   
   // Add mirror URL
   if (url.includes('huggingface.co') && !url.includes('hf-mirror.com')) {
-    const mirrorUrl = url.replace('https://huggingface.co', HF_MIRROR);
+    const mirrorUrl = url.replace('https://huggingface.co', 'https://hf-mirror.com');
     urlsToTry.push(mirrorUrl);
   }
 
@@ -181,7 +177,6 @@ export async function createSession(
   modelConfig: ModelConfig,
   useWebGPU: boolean
 ): Promise<{ session: ort.InferenceSession; provider: string }> {
-  // WebGPU is strongly recommended for this model
   const providers = useWebGPU ? ['webgpu', 'wasm'] : ['wasm'];
   let lastError: Error | null = null;
 

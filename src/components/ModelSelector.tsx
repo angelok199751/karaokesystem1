@@ -40,7 +40,7 @@ export function ModelSelector({ models, selected, onChange, disabled }: ModelSel
                 {model.size}
               </span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-gray-300">
-                Vocals + Instrumental
+                2 stems
               </span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-gray-300">
                 MIT License
