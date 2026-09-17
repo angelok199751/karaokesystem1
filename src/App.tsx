@@ -158,7 +158,7 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">Audio Separator</h1>
-              <p className="text-xs text-gray-400">Split vocals & instrumentals in your browser</p>
+              <p className="text-xs text-gray-400">BS PolarFormer — Split vocals & instrumentals in your browser</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -180,7 +180,7 @@ function App() {
         <div className="mb-8 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
           <p className="text-sm text-indigo-200">
             <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server. 
-            Models are cached locally after first download. Uses <strong>UVR-MDX-NET</strong> — proven vocal separation models.
+            Models are cached locally after first download. Uses <strong>BS PolarFormer</strong> — state-of-the-art vocal separation model.
           </p>
         </div>
 
@@ -349,8 +349,8 @@ function App() {
               <p>WebGPU is 3-5x faster than WASM. First model download: {selectedModel.size}.</p>
             </div>
             <div className="p-4 rounded-lg bg-white/5">
-              <h4 className="font-medium text-gray-300 mb-1">🧠 Models</h4>
-              <p>UVR-MDX-NET — proven vocal separation. 28-64MB. Works in Russia without VPN.</p>
+              <h4 className="font-medium text-gray-300 mb-1">🧠 Model</h4>
+              <p>BS PolarFormer — BSRoformer architecture with PoPE embeddings. SDR 11.0 on vocals.</p>
             </div>
           </div>
         </div>

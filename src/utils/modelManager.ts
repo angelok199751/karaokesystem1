@@ -25,58 +25,41 @@ export interface ModelConfig {
 
 // UVR models from official repository - works in Russia without VPN
 
-// GitHub proxy with CORS support - works in Russia
-const GITHUB_PROXY = 'https://mirror.ghproxy.com/';
-const GITHUB_RELEASES_BASE = 'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models';
+// Hugging Face mirror for China/Russia - works without VPN
+const HF_MIRROR = 'https://hf-mirror.com';
 
 export const MODELS: ModelConfig[] = [
   {
-    id: 'uvr-mdxnet-9482',
-    name: 'UVR-MDX-NET 9482 (Fast)',
-    description: 'Fast vocal separation. 28MB. Good balance of speed and quality.',
-    url: `${GITHUB_PROXY}${GITHUB_RELEASES_BASE}/UVR_MDXNET_9482.onnx`,
-    size: '~28 MB',
+    id: 'bs-polarformer-fp16',
+    name: 'BS PolarFormer FP16 (Recommended)',
+    description: 'High-quality vocal separation. 103MB. Best balance of quality and speed.',
+    url: `${HF_MIRROR}/bgkb/bs_polarformer/resolve/main/bs_polarformer_fp16.onnx`,
+    size: '~103 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 768,
-    hopLength: 384,
-    winLength: 768,
-    chunkSize: 262144, // ~6 seconds
+    nFft: 2048,
+    hopLength: 512,
+    winLength: 2048,
+    chunkSize: 131072,
     overlap: 2,
-    inputName: 'input',
-    outputName: 'output',
+    inputName: 'stft_features',
+    outputName: 'mask',
   },
   {
-    id: 'uvr-mdxnet-voc-ft',
-    name: 'UVR-MDX-NET Voc_FT (Best Quality)',
-    description: 'High-quality vocal separation. 64MB. Best results.',
-    url: `${GITHUB_PROXY}${GITHUB_RELEASES_BASE}/UVR-MDX-NET-Voc_FT.onnx`,
-    size: '~64 MB',
+    id: 'bs-polarformer-fp32',
+    name: 'BS PolarFormer FP32 (Highest Quality)',
+    description: 'Maximum quality vocal separation. 201MB. Slower download but best results.',
+    url: `${HF_MIRROR}/bgkb/bs_polarformer/resolve/main/bs_polarformer.onnx`,
+    size: '~201 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 1024,
+    nFft: 2048,
     hopLength: 512,
-    winLength: 1024,
-    chunkSize: 262144, // ~6 seconds
+    winLength: 2048,
+    chunkSize: 131072,
     overlap: 2,
-    inputName: 'input',
-    outputName: 'output',
-  },
-  {
-    id: 'uvr-mdxnet-inst-hq4',
-    name: 'UVR-MDX-NET Inst_HQ_4 (Alternative)',
-    description: 'Alternative high-quality model. 56MB. Different training.',
-    url: `${GITHUB_PROXY}${GITHUB_RELEASES_BASE}/UVR-MDX-NET-Inst_HQ_4.onnx`,
-    size: '~56 MB',
-    stems: ['Vocals', 'Instrumental'],
-    sampleRate: 44100,
-    nFft: 1024,
-    hopLength: 512,
-    winLength: 1024,
-    chunkSize: 262144, // ~6 seconds
-    overlap: 2,
-    inputName: 'input',
-    outputName: 'output',
+    inputName: 'stft_features',
+    outputName: 'mask',
   },
 ];
 

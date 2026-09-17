@@ -1,6 +1,6 @@
 /**
- * Audio separation using UVR-MDX-NET ONNX models
- * Adapted for models from GitHub Releases (sherpa-onnx)
+ * Audio separation using BS PolarFormer ONNX model
+ * Based on the reference implementation from bgkb/bs_polarformer
  */
 import * as ort from 'onnxruntime-web';
 import { ModelConfig } from './modelManager';
@@ -146,54 +146,63 @@ function istft(stftData: Float32Array, nFrames: number, nFft: number, hop: numbe
   return out;
 }
 
-// ── Prepare model input for UVR-MDX-NET ────────────────────────────────────
+// ── Prepare model input from stereo chunk ───────────────────────────────────
 
 interface ChunkInput {
   input: Float32Array;
   nFrames: number;
-  stftData: STFTResult;
+  stftL: STFTResult;
+  stftR: STFTResult;
 }
 
-/**
- * Prepare input for UVR-MDX-NET model
- * Input shape: [1, 1, n_freq, n_frames] - magnitude spectrogram
- */
 function prepareChunkInput(
-  mono: Float32Array,
+  left: Float32Array,
+  right: Float32Array,
   win: Float32Array,
   nFft: number,
   hop: number,
   nFreq: number
 ): ChunkInput {
-  const stftResult = stft(mono, nFft, hop, win, nFreq);
-  const nFrames = stftResult.nFrames;
+  const stftL = stft(left, nFft, hop, win, nFreq);
+  const stftR = stft(right, nFft, hop, win, nFreq);
+  const nFrames = stftL.nFrames;
   
-  // Compute magnitude spectrogram
-  const magnitude = new Float32Array(nFreq * nFrames);
-  for (let f = 0; f < nFreq; f++) {
-    for (let t = 0; t < nFrames; t++) {
-      const re = stftResult.data[(f * nFrames + t) * 2];
-      const im = stftResult.data[(f * nFrames + t) * 2 + 1];
-      magnitude[f * nFrames + t] = Math.sqrt(re * re + im * im);
+  // Interleave: (f_left, f_right) for each freq
+  // Shape: (nFrames, n_freq*2*2) = (nFrames, 4100)
+  const totalFreqs = nFreq * 2; // 2050
+  const featDim = totalFreqs * 2; // 4100
+  const input = new Float32Array(nFrames * featDim);
+  
+  for (let t = 0; t < nFrames; t++) {
+    for (let f = 0; f < nFreq; f++) {
+      const lRe = stftL.data[(f * nFrames + t) * 2];
+      const lIm = stftL.data[(f * nFrames + t) * 2 + 1];
+      const rRe = stftR.data[(f * nFrames + t) * 2];
+      const rIm = stftR.data[(f * nFrames + t) * 2 + 1];
+      
+      // band order: (f*2) = left, (f*2+1) = right
+      const base = t * featDim;
+      input[base + (f * 2) * 2] = lRe;
+      input[base + (f * 2) * 2 + 1] = lIm;
+      input[base + (f * 2 + 1) * 2] = rRe;
+      input[base + (f * 2 + 1) * 2 + 1] = rIm;
     }
   }
   
-  return { input: magnitude, nFrames, stftData: stftResult };
+  return { input, nFrames, stftL, stftR };
 }
 
 // ── Apply mask and iSTFT ────────────────────────────────────────────────────
 
 interface ReconstructedAudio {
-  audio: Float32Array;
+  left: Float32Array;
+  right: Float32Array;
 }
 
-/**
- * Apply mask from model output and reconstruct audio
- * Model output is a mask in range [0, 1]
- */
 function applyMaskAndReconstruct(
   mask: Float32Array,
-  stftData: STFTResult,
+  stftL: STFTResult,
+  stftR: STFTResult,
   nFrames: number,
   win: Float32Array,
   nFft: number,
@@ -201,31 +210,39 @@ function applyMaskAndReconstruct(
   nFreq: number,
   length: number
 ): ReconstructedAudio {
-  const masked = new Float32Array(nFreq * nFrames * 2);
+  // mask shape: [1, 1, 2050, nFrames, 2] flattened
+  const maskedL = new Float32Array(nFreq * nFrames * 2);
+  const maskedR = new Float32Array(nFreq * nFrames * 2);
 
-  // Apply mask to complex STFT
   for (let f = 0; f < nFreq; f++) {
     for (let t = 0; t < nFrames; t++) {
-      const maskIdx = f * nFrames + t;
-      const m = mask[maskIdx];
-      
-      const stftIdx = (f * nFrames + t) * 2;
-      const re = stftData.data[stftIdx];
-      const im = stftData.data[stftIdx + 1];
-      
-      masked[stftIdx] = re * m;
-      masked[stftIdx + 1] = im * m;
+      // mask indices
+      const mLIdx = ((f * 2) * nFrames + t) * 2;
+      const mRIdx = ((f * 2 + 1) * nFrames + t) * 2;
+      const mLRe = mask[mLIdx], mLIm = mask[mLIdx + 1];
+      const mRRe = mask[mRIdx], mRIm = mask[mRIdx + 1];
+
+      const sIdx = (f * nFrames + t) * 2;
+      const sLRe = stftL.data[sIdx], sLIm = stftL.data[sIdx + 1];
+      const sRRe = stftR.data[sIdx], sRIm = stftR.data[sIdx + 1];
+
+      // Complex multiply
+      maskedL[sIdx] = sLRe * mLRe - sLIm * mLIm;
+      maskedL[sIdx + 1] = sLRe * mLIm + sLIm * mLRe;
+      maskedR[sIdx] = sRRe * mRRe - sRIm * mRIm;
+      maskedR[sIdx + 1] = sRRe * mRIm + sRIm * mRRe;
     }
   }
   
   // Zero DC bin
   for (let t = 0; t < nFrames; t++) {
-    masked[t * 2] = 0;
-    masked[t * 2 + 1] = 0;
+    maskedL[t * 2] = 0; maskedL[t * 2 + 1] = 0;
+    maskedR[t * 2] = 0; maskedR[t * 2 + 1] = 0;
   }
 
-  const audio = istft(masked, nFrames, nFft, hop, win, nFreq, length);
-  return { audio };
+  const reconL = istft(maskedL, nFrames, nFft, hop, win, nFreq, length);
+  const reconR = istft(maskedR, nFrames, nFft, hop, win, nFreq, length);
+  return { left: reconL, right: reconR };
 }
 
 // ── Resample ────────────────────────────────────────────────────────────────
@@ -262,28 +279,21 @@ export async function separateAudio(
   
   onProgress?.({ stage: 'preparing', progress: 0, message: 'Preparing audio...' });
 
-  // Convert to mono
-  let mono: Float32Array;
-  if (audioBuffer.numberOfChannels === 1) {
-    mono = audioBuffer.getChannelData(0);
-  } else {
-    // Mix down to mono
-    const length = audioBuffer.length;
-    mono = new Float32Array(length);
-    for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
-      const channelData = audioBuffer.getChannelData(ch);
-      for (let i = 0; i < length; i++) {
-        mono[i] += channelData[i] / audioBuffer.numberOfChannels;
-      }
-    }
-  }
+  // Get stereo channels
+  const left = audioBuffer.getChannelData(0);
+  const right = audioBuffer.numberOfChannels > 1 
+    ? audioBuffer.getChannelData(1) 
+    : audioBuffer.getChannelData(0);
 
   // Resample to model's sample rate if needed
-  const procMono = modelConfig.sampleRate !== originalSampleRate
-    ? resample(mono, originalSampleRate, modelConfig.sampleRate)
-    : new Float32Array(mono);
+  const procLeft = modelConfig.sampleRate !== originalSampleRate
+    ? resample(left, originalSampleRate, modelConfig.sampleRate)
+    : new Float32Array(left);
+  const procRight = modelConfig.sampleRate !== originalSampleRate
+    ? resample(right, originalSampleRate, modelConfig.sampleRate)
+    : new Float32Array(right);
 
-  const totalSamples = procMono.length;
+  const totalSamples = procLeft.length;
   const win = hannWindow(modelConfig.winLength);
   const step = Math.floor(modelConfig.chunkSize / modelConfig.overlap);
   
@@ -294,7 +304,8 @@ export async function separateAudio(
   }
 
   // Accumulators for overlap-add
-  const vocalsAccum = new Float32Array(totalSamples);
+  const vocalsL = new Float32Array(totalSamples);
+  const vocalsR = new Float32Array(totalSamples);
   const count = new Float32Array(totalSamples);
 
   const t0 = performance.now();
@@ -305,29 +316,31 @@ export async function separateAudio(
     const chunkLen = end - start;
 
     // Extract & pad chunk
-    const chunk = new Float32Array(modelConfig.chunkSize);
-    chunk.set(procMono.subarray(start, end));
+    const cL = new Float32Array(modelConfig.chunkSize);
+    const cR = new Float32Array(modelConfig.chunkSize);
+    cL.set(procLeft.subarray(start, end));
+    cR.set(procRight.subarray(start, end));
 
     // STFT & prepare input
-    const { input, nFrames, stftData } = prepareChunkInput(
-      chunk, win, modelConfig.nFft, modelConfig.hopLength, nFreq
+    const { input, nFrames, stftL, stftR } = prepareChunkInput(
+      cL, cR, win, modelConfig.nFft, modelConfig.hopLength, nFreq
     );
 
     // Run ONNX inference
-    // Input shape: [1, 1, n_freq, n_frames]
-    const tensor = new ort.Tensor('float32', input, [1, 1, nFreq, nFrames]);
+    const tensor = new ort.Tensor('float32', input, [1, nFrames, nFreq * 2 * 2]);
     const results = await session.run({ [modelConfig.inputName]: tensor });
     const mask = results[modelConfig.outputName].data as Float32Array;
 
     // Reconstruct
     const recon = applyMaskAndReconstruct(
-      mask, stftData, nFrames, win,
+      mask, stftL, stftR, nFrames, win,
       modelConfig.nFft, modelConfig.hopLength, nFreq, modelConfig.chunkSize
     );
 
     // Accumulate with overlap
     for (let i = 0; i < chunkLen; i++) {
-      vocalsAccum[start + i] += recon.audio[i];
+      vocalsL[start + i] += recon.left[i];
+      vocalsR[start + i] += recon.right[i];
       count[start + i] += 1;
     }
 
@@ -353,52 +366,63 @@ export async function separateAudio(
   // Average overlaps
   for (let i = 0; i < totalSamples; i++) {
     if (count[i] > 0) {
-      vocalsAccum[i] /= count[i];
+      vocalsL[i] /= count[i];
+      vocalsR[i] /= count[i];
     }
   }
 
   onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Building instrumental...' });
 
   // Build instrumental = original - vocals
-  const instrAccum = new Float32Array(totalSamples);
+  const instrL = new Float32Array(totalSamples);
+  const instrR = new Float32Array(totalSamples);
   for (let i = 0; i < totalSamples; i++) {
-    instrAccum[i] = procMono[i] - vocalsAccum[i];
+    instrL[i] = procLeft[i] - vocalsL[i];
+    instrR[i] = procRight[i] - vocalsR[i];
   }
 
   // Resample back to original sample rate if needed
-  let finalVocals = vocalsAccum;
-  let finalInstr = instrAccum;
+  let finalVocalsL = vocalsL;
+  let finalVocalsR = vocalsR;
+  let finalInstrL = instrL;
+  let finalInstrR = instrR;
 
   if (modelConfig.sampleRate !== originalSampleRate) {
-    finalVocals = resample(vocalsAccum, modelConfig.sampleRate, originalSampleRate);
-    finalInstr = resample(instrAccum, modelConfig.sampleRate, originalSampleRate);
+    finalVocalsL = resample(vocalsL, modelConfig.sampleRate, originalSampleRate);
+    finalVocalsR = resample(vocalsR, modelConfig.sampleRate, originalSampleRate);
+    finalInstrL = resample(instrL, modelConfig.sampleRate, originalSampleRate);
+    finalInstrR = resample(instrR, modelConfig.sampleRate, originalSampleRate);
   }
 
   // Trim to original length
   const origLen = audioBuffer.length;
-  if (finalVocals.length > origLen) {
-    finalVocals = finalVocals.slice(0, origLen);
-    finalInstr = finalInstr.slice(0, origLen);
+  if (finalVocalsL.length > origLen) {
+    finalVocalsL = finalVocalsL.slice(0, origLen);
+    finalVocalsR = finalVocalsR.slice(0, origLen);
+    finalInstrL = finalInstrL.slice(0, origLen);
+    finalInstrR = finalInstrR.slice(0, origLen);
   }
 
   onProgress?.({ stage: 'reconstructing', progress: 98, message: 'Encoding WAV files...' });
 
-  // Create AudioBuffers (mono)
-  const vocalsCtx = new OfflineAudioContext(1, finalVocals.length, originalSampleRate);
-  const vocalsBuf = vocalsCtx.createBuffer(1, finalVocals.length, originalSampleRate);
-  const vocalsChannel = new Float32Array(finalVocals.length);
-  vocalsChannel.set(finalVocals);
-  vocalsBuf.copyToChannel(vocalsChannel, 0);
+  // Create stereo interleaved data for WAV encoding
+  const vocalsStereo = interleaveStereo(finalVocalsL, finalVocalsR);
+  const instrStereo = interleaveStereo(finalInstrL, finalInstrR);
 
-  const instrCtx = new OfflineAudioContext(1, finalInstr.length, originalSampleRate);
-  const instrBuf = instrCtx.createBuffer(1, finalInstr.length, originalSampleRate);
-  const instrChannel = new Float32Array(finalInstr.length);
-  instrChannel.set(finalInstr);
-  instrBuf.copyToChannel(instrChannel, 0);
+  // Create AudioBuffers
+  const vocalsCtx = new OfflineAudioContext(2, finalVocalsL.length, originalSampleRate);
+  const vocalsBuf = vocalsCtx.createBuffer(2, finalVocalsL.length, originalSampleRate);
+  vocalsBuf.copyToChannel(new Float32Array(finalVocalsL), 0);
+  vocalsBuf.copyToChannel(new Float32Array(finalVocalsR), 1);
 
-  // Encode to WAV (mono)
-  const vocalsWav = encodeMonoWAV(finalVocals, originalSampleRate);
-  const instrWav = encodeMonoWAV(finalInstr, originalSampleRate);
+  const instrCtx = new OfflineAudioContext(2, finalInstrL.length, originalSampleRate);
+  const instrBuf = instrCtx.createBuffer(2, finalInstrL.length, originalSampleRate);
+  instrBuf.copyToChannel(new Float32Array(finalInstrL), 0);
+  instrBuf.copyToChannel(new Float32Array(finalInstrR), 1);
+
+  // Encode to WAV (stereo)
+  const vocalsWav = encodeStereoWAV(vocalsStereo, originalSampleRate);
+  const instrWav = encodeStereoWAV(instrStereo, originalSampleRate);
 
   onProgress?.({ stage: 'done', progress: 100, message: 'Done!' });
 
@@ -408,9 +432,18 @@ export async function separateAudio(
   ];
 }
 
-function encodeMonoWAV(audioData: Float32Array, sampleRate: number): ArrayBuffer {
-  const nSamples = audioData.length;
-  const buf = new ArrayBuffer(44 + nSamples * 2);
+function interleaveStereo(left: Float32Array, right: Float32Array): Float32Array {
+  const out = new Float32Array(left.length * 2);
+  for (let i = 0; i < left.length; i++) {
+    out[i * 2] = left[i];
+    out[i * 2 + 1] = right[i];
+  }
+  return out;
+}
+
+function encodeStereoWAV(interleaved: Float32Array, sampleRate: number): ArrayBuffer {
+  const nSamples = interleaved.length / 2;
+  const buf = new ArrayBuffer(44 + interleaved.length * 2);
   const view = new DataView(buf);
   
   const writeStr = (off: number, s: string) => {
@@ -418,22 +451,22 @@ function encodeMonoWAV(audioData: Float32Array, sampleRate: number): ArrayBuffer
   };
   
   writeStr(0, 'RIFF');
-  view.setUint32(4, 36 + nSamples * 2, true);
+  view.setUint32(4, 36 + interleaved.length * 2, true);
   writeStr(8, 'WAVE');
   writeStr(12, 'fmt ');
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, 1, true); // mono
+  view.setUint16(22, 2, true); // stereo
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate
-  view.setUint16(32, 2, true); // block align
+  view.setUint32(28, sampleRate * 4, true); // byte rate
+  view.setUint16(32, 4, true); // block align
   view.setUint16(34, 16, true); // bits per sample
   writeStr(36, 'data');
-  view.setUint32(40, nSamples * 2, true);
+  view.setUint32(40, interleaved.length * 2, true);
   
   let off = 44;
-  for (let i = 0; i < nSamples; i++) {
-    const sample = Math.max(-1, Math.min(1, audioData[i]));
+  for (let i = 0; i < interleaved.length; i++) {
+    const sample = Math.max(-1, Math.min(1, interleaved[i]));
     view.setInt16(off, sample * 32767, true);
     off += 2;
   }
