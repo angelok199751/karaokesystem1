@@ -111,3 +111,11 @@ export type {
   AlignedSegment, 
   AlignedKaraokeFile 
 } from './lyricsAligner';
+
+// Re-export auto lyrics generator
+export { 
+  generateAutoLyrics, 
+  exportAutoLyrics, 
+  downloadAutoLyrics 
+} from './autoLyricsGenerator';
+export type { AutoLyricsOptions } from './autoLyricsGenerator';

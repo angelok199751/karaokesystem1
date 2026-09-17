@@ -4,6 +4,7 @@ import { PianoRoll } from './PianoRoll';
 import { KaraokeNote, KaraokeJSON } from '../utils/transcription/karaokeJSON';
 import { MidiCleanerPanel } from './MidiCleanerPanel';
 import { LyricsImporter } from './LyricsImporter';
+import { AutoLyricsGenerator } from './AutoLyricsGenerator';
 import { cleanMidi, CleanerOptions } from '../utils/transcription/midiCleaner';
 import { alignNotesToLyrics, downloadAlignedKaraoke, LyricsFile, AlignedKaraokeFile } from '../utils/transcription/lyricsAligner';
 
@@ -366,6 +367,12 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
 
       {/* MIDI Cleaner */}
       <MidiCleanerPanel onClean={handleClean} />
+
+      {/* Auto Lyrics Generator */}
+      <AutoLyricsGenerator 
+        karaokeJSON={karaokeJSON} 
+        onLyricsGenerated={handleLyricsImport} 
+      />
 
       {/* Lyrics Importer */}
       <LyricsImporter onImport={handleLyricsImport} />
