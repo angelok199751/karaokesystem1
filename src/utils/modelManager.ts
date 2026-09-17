@@ -25,15 +25,16 @@ export interface ModelConfig {
 
 // UVR models from official repository - works in Russia without VPN
 
-// GitHub proxy that works in Russia and supports CORS
-const GITHUB_PROXY = 'https://ghfast.top/';
+// GitHub proxy with CORS support - works in Russia
+const GITHUB_PROXY = 'https://mirror.ghproxy.com/';
+const GITHUB_RELEASES_BASE = 'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models';
 
 export const MODELS: ModelConfig[] = [
   {
     id: 'uvr-mdxnet-9482',
     name: 'UVR-MDX-NET 9482 (Fast)',
     description: 'Fast vocal separation. 28MB. Good balance of speed and quality.',
-    url: `${GITHUB_PROXY}https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR_MDXNET_9482.onnx`,
+    url: `${GITHUB_PROXY}${GITHUB_RELEASES_BASE}/UVR_MDXNET_9482.onnx`,
     size: '~28 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -49,7 +50,7 @@ export const MODELS: ModelConfig[] = [
     id: 'uvr-mdxnet-voc-ft',
     name: 'UVR-MDX-NET Voc_FT (Best Quality)',
     description: 'High-quality vocal separation. 64MB. Best results.',
-    url: `${GITHUB_PROXY}https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Voc_FT.onnx`,
+    url: `${GITHUB_PROXY}${GITHUB_RELEASES_BASE}/UVR-MDX-NET-Voc_FT.onnx`,
     size: '~64 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -65,7 +66,7 @@ export const MODELS: ModelConfig[] = [
     id: 'uvr-mdxnet-inst-hq4',
     name: 'UVR-MDX-NET Inst_HQ_4 (Alternative)',
     description: 'Alternative high-quality model. 56MB. Different training.',
-    url: `${GITHUB_PROXY}https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Inst_HQ_4.onnx`,
+    url: `${GITHUB_PROXY}${GITHUB_RELEASES_BASE}/UVR-MDX-NET-Inst_HQ_4.onnx`,
     size: '~56 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -120,10 +121,13 @@ export async function downloadModel(
   // Try to download with fallback URLs
   const urlsToTry = [url];
   
-  // If using proxy, also try direct URL as fallback
-  if (url.includes(GITHUB_PROXY)) {
-    const directUrl = url.replace(GITHUB_PROXY, '');
+  // Add alternative proxies and direct URL as fallbacks
+  if (url.includes('mirror.ghproxy.com')) {
+    const directUrl = url.replace('https://mirror.ghproxy.com/', '');
     urlsToTry.push(directUrl);
+    // Try another proxy
+    urlsToTry.push(`https://gh-proxy.com/${directUrl}`);
+    urlsToTry.push(`https://ghfast.top/${directUrl}`);
   }
 
   let lastError: Error | null = null;
@@ -175,7 +179,7 @@ export async function downloadModel(
     }
   }
 
-  throw lastError || new Error('Failed to download model from all sources');
+  throw lastError || new Error(`Failed to download model from all sources. Tried URLs: ${urlsToTry.join(', ')}`);
 }
 
 export async function checkWebGPUAvailability(): Promise<boolean> {
