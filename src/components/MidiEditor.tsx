@@ -1,0 +1,286 @@
+import { useState, useRef, useEffect } from 'react';
+import * as Tone from 'tone';
+import { PianoRoll } from './PianoRoll';
+import { KaraokeNote, KaraokeJSON } from '../utils/transcription/karaokeJSON';
+
+interface MidiEditorProps {
+  karaokeJSON: KaraokeJSON;
+  onUpdate: (updated: KaraokeJSON) => void;
+}
+
+export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [selectedNoteIndex, setSelectedNoteIndex] = useState<number | null>(null);
+  const [volume, setVolume] = useState(-10);
+  const synthRef = useRef<Tone.PolySynth | null>(null);
+  const animationRef = useRef<number | null>(null);
+  const startTimeRef = useRef<number>(0);
+
+  // Все ноты из всех фраз
+  const allNotes: KaraokeNote[] = karaokeJSON.phrases.flatMap(p => p.notes);
+
+  // Инициализация синтезатора
+  useEffect(() => {
+    synthRef.current = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: 'triangle' },
+      envelope: { attack: 0.02, decay: 0.1, sustain: 0.3, release: 0.5 }
+    }).toDestination();
+    
+    Tone.Destination.volume.value = volume;
+
+    return () => {
+      synthRef.current?.dispose();
+    };
+  }, []);
+
+  // Обновление громкости
+  useEffect(() => {
+    if (synthRef.current) {
+      Tone.Destination.volume.value = volume;
+    }
+  }, [volume]);
+
+  // Воспроизведение MIDI
+  const play = async () => {
+    await Tone.start();
+    
+    if (!synthRef.current) return;
+
+    setIsPlaying(true);
+    startTimeRef.current = Tone.now() - currentTime;
+
+    // Планируем все ноты
+    allNotes.forEach(note => {
+      if (note.start >= currentTime) {
+        const duration = note.end - note.start;
+        synthRef.current?.triggerAttackRelease(
+          Tone.Frequency(note.note, 'midi').toNote(),
+          duration,
+          Tone.now() + (note.start - currentTime)
+        );
+      }
+    });
+
+    // Анимация текущей позиции
+    const updateCurrentTime = () => {
+      const elapsed = Tone.now() - startTimeRef.current;
+      setCurrentTime(elapsed);
+
+      const maxTime = allNotes.length > 0 ? Math.max(...allNotes.map(n => n.end)) : 0;
+      if (elapsed < maxTime) {
+        animationRef.current = requestAnimationFrame(updateCurrentTime);
+      } else {
+        stop();
+      }
+    };
+
+    animationRef.current = requestAnimationFrame(updateCurrentTime);
+  };
+
+  const stop = () => {
+    setIsPlaying(false);
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
+    }
+    synthRef.current?.releaseAll();
+  };
+
+  const pause = () => {
+    stop();
+  };
+
+  // Обновление ноты
+  const updateNote = (index: number, updates: Partial<KaraokeNote>) => {
+    const newPhrases = karaokeJSON.phrases.map(phrase => {
+      const newNotes = phrase.notes.map((note, i) => {
+        // Находим глобальный индекс
+        const globalIndex = karaokeJSON.phrases.findIndex(p => p === phrase) * 1000 + i;
+        if (globalIndex === index) {
+          return { ...note, ...updates };
+        }
+        return note;
+      });
+      return { ...phrase, notes: newNotes };
+    });
+
+    onUpdate({ ...karaokeJSON, phrases: newPhrases });
+  };
+
+  // Удаление ноты
+  const deleteNote = (index: number) => {
+    const newPhrases = karaokeJSON.phrases.map(phrase => ({
+      ...phrase,
+      notes: phrase.notes.filter((_, i) => {
+        const globalIndex = karaokeJSON.phrases.findIndex(p => p === phrase) * 1000 + i;
+        return globalIndex !== index;
+      })
+    })).filter(phrase => phrase.notes.length > 0);
+
+    onUpdate({ ...karaokeJSON, phrases: newPhrases });
+    setSelectedNoteIndex(null);
+  };
+
+  // Получение глобального индекса ноты
+  const getGlobalIndex = (phraseIndex: number, noteIndex: number): number => {
+    return phraseIndex * 1000 + noteIndex;
+  };
+
+  const selectedNote = selectedNoteIndex !== null 
+    ? allNotes[selectedNoteIndex % 1000]
+    : null;
+
+  return (
+    <div className="space-y-4">
+      {/* Контролы воспроизведения */}
+      <div className="bg-gray-800 rounded-lg p-4 space-y-4">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={isPlaying ? pause : play}
+            className="px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg font-medium transition"
+          >
+            {isPlaying ? '⏸️ Пауза' : '▶️ Воспроизвести'}
+          </button>
+          
+          <button
+            onClick={stop}
+            disabled={!isPlaying}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium transition disabled:opacity-50"
+          >
+            ⏹️ Стоп
+          </button>
+
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-400">🔊</span>
+            <input
+              type="range"
+              min="-40"
+              max="0"
+              value={volume}
+              onChange={(e) => setVolume(Number(e.target.value))}
+              className="w-32"
+            />
+          </div>
+
+          <div className="text-sm text-gray-400">
+            {currentTime.toFixed(2)}s / {allNotes.length > 0 ? Math.max(...allNotes.map(n => n.end)).toFixed(2) : '0.00'}s
+          </div>
+        </div>
+
+        {/* Прогресс-бар */}
+        <div className="w-full bg-gray-700 rounded-full h-2">
+          <div
+            className="bg-purple-600 h-2 rounded-full transition-all"
+            style={{
+              width: `${allNotes.length > 0 ? (currentTime / Math.max(...allNotes.map(n => n.end))) * 100 : 0}%`
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Piano Roll */}
+      <div>
+        <h3 className="text-lg font-semibold mb-2">🎹 Piano Roll</h3>
+        <PianoRoll
+          notes={allNotes}
+          selectedNoteIndex={selectedNoteIndex}
+          onNoteClick={setSelectedNoteIndex}
+          currentTime={currentTime}
+          onTimeChange={setCurrentTime}
+        />
+      </div>
+
+      {/* Редактор выбранной ноты */}
+      {selectedNote && selectedNoteIndex !== null && (
+        <div className="bg-gray-800 rounded-lg p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold">✏️ Редактирование ноты</h3>
+            <button
+              onClick={() => deleteNote(selectedNoteIndex)}
+              className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm transition"
+            >
+              🗑️ Удалить
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Нота (MIDI)</label>
+              <input
+                type="number"
+                min="0"
+                max="127"
+                value={selectedNote.note}
+                onChange={(e) => updateNote(selectedNoteIndex, { note: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 focus:border-purple-500 focus:outline-none"
+              />
+              <div className="text-xs text-gray-500 mt-1">
+                {Tone.Frequency(selectedNote.note, 'midi').toNote()}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Начало (с)</label>
+              <input
+                type="number"
+                step="0.001"
+                min="0"
+                value={selectedNote.start}
+                onChange={(e) => updateNote(selectedNoteIndex, { start: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Конец (с)</label>
+              <input
+                type="number"
+                step="0.001"
+                min="0"
+                value={selectedNote.end}
+                onChange={(e) => updateNote(selectedNoteIndex, { end: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Длительность (с)</label>
+              <div className="px-3 py-2 bg-gray-700 rounded border border-gray-600">
+                {(selectedNote.end - selectedNote.start).toFixed(3)}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Статистика */}
+      <div className="bg-gray-800 rounded-lg p-4">
+        <h3 className="text-lg font-semibold mb-2">📊 Статистика</h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div>
+            <div className="text-gray-400">Всего нот</div>
+            <div className="text-xl font-bold">{allNotes.length}</div>
+          </div>
+          <div>
+            <div className="text-gray-400">Фраз</div>
+            <div className="text-xl font-bold">{karaokeJSON.phrases.length}</div>
+          </div>
+          <div>
+            <div className="text-gray-400">BPM</div>
+            <div className="text-xl font-bold">{karaokeJSON.bpm}</div>
+          </div>
+          <div>
+            <div className="text-gray-400">Диапазон</div>
+            <div className="text-xl font-bold">
+              {allNotes.length > 0 
+                ? `${Math.min(...allNotes.map(n => n.note))} - ${Math.max(...allNotes.map(n => n.note))}`
+                : '-'
+              }
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
