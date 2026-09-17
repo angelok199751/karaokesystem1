@@ -25,15 +25,15 @@ export interface ModelConfig {
 
 // UVR models from official repository - works in Russia without VPN
 
-// Hugging Face mirror for China/Russia - works without VPN
-const HF_MIRROR = 'https://hf-mirror.com';
+// Direct GitHub raw content - works in Russia (may be slow)
+const GITHUB_RAW = 'https://raw.githubusercontent.com';
 
 export const MODELS: ModelConfig[] = [
   {
     id: 'bs-polarformer-fp16',
     name: 'BS PolarFormer FP16 (Recommended)',
     description: 'High-quality vocal separation. 103MB. Best balance of quality and speed.',
-    url: `${HF_MIRROR}/bgkb/bs_polarformer/resolve/main/bs_polarformer_fp16.onnx`,
+    url: `${GITHUB_RAW}/bgkb/bs_polarformer/main/bs_polarformer_fp16.onnx`,
     size: '~103 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -49,7 +49,7 @@ export const MODELS: ModelConfig[] = [
     id: 'bs-polarformer-fp32',
     name: 'BS PolarFormer FP32 (Highest Quality)',
     description: 'Maximum quality vocal separation. 201MB. Slower download but best results.',
-    url: `${HF_MIRROR}/bgkb/bs_polarformer/resolve/main/bs_polarformer.onnx`,
+    url: `${GITHUB_RAW}/bgkb/bs_polarformer/main/bs_polarformer.onnx`,
     size: '~201 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -104,13 +104,15 @@ export async function downloadModel(
   // Try to download with fallback URLs
   const urlsToTry = [url];
   
-  // Add alternative proxies and direct URL as fallbacks
-  if (url.includes('mirror.ghproxy.com')) {
-    const directUrl = url.replace('https://mirror.ghproxy.com/', '');
-    urlsToTry.push(directUrl);
-    // Try another proxy
-    urlsToTry.push(`https://gh-proxy.com/${directUrl}`);
-    urlsToTry.push(`https://ghfast.top/${directUrl}`);
+  // Add alternative sources based on the original URL
+  if (url.includes('raw.githubusercontent.com')) {
+    // Extract the path after raw.githubusercontent.com
+    const path = url.replace('https://raw.githubusercontent.com', '');
+    // Try various proxies
+    urlsToTry.push(`https://ghproxy.com/https://raw.githubusercontent.com${path}`);
+    urlsToTry.push(`https://gh-proxy.com/https://raw.githubusercontent.com${path}`);
+    urlsToTry.push(`https://mirror.ghproxy.com/https://raw.githubusercontent.com${path}`);
+    urlsToTry.push(`https://hub.gitmirror.com/https://raw.githubusercontent.com${path}`);
   }
 
   let lastError: Error | null = null;
