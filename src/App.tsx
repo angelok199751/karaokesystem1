@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import * as ort from 'onnxruntime-web';
 import { MODELS, ModelConfig, checkWebGPUAvailability } from './utils/modelManager';
 import { separateAudio, SeparationResult, SeparationProgress } from './utils/separation';
+import { transcribeAudio, downloadMidi, TranscriptionProgress } from './utils/transcription';
 import { AudioPlayer } from './components/AudioPlayer';
 import { FileUpload } from './components/FileUpload';
 import { ProgressBar } from './components/ProgressBar';
@@ -13,6 +14,7 @@ interface AppProgress {
   modelProgress: number;
   modelMessage: string;
   separationProgress: SeparationProgress | null;
+  transcriptionProgress: TranscriptionProgress | null;
 }
 
 function App() {
@@ -21,10 +23,13 @@ function App() {
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
   const [selectedModel, setSelectedModel] = useState<ModelConfig>(MODELS[0]);
   const [results, setResults] = useState<SeparationResult[]>([]);
+  const [midiData, setMidiData] = useState<Uint8Array | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [progress, setProgress] = useState<AppProgress>({
     modelProgress: 0,
     modelMessage: '',
     separationProgress: null,
+    transcriptionProgress: null,
   });
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [webgpuAvailable, setWebgpuAvailable] = useState<boolean>(false);
@@ -82,6 +87,7 @@ function App() {
       modelProgress: 0,
       modelMessage: 'Starting download...',
       separationProgress: null,
+      transcriptionProgress: null,
     });
 
     try {
@@ -131,14 +137,48 @@ function App() {
     setAudioFile(null);
     setAudioBuffer(null);
     setResults([]);
+    setMidiData(null);
+    setIsTranscribing(false);
     setErrorMsg('');
     setActiveProvider('');
-    setProgress({ modelProgress: 0, modelMessage: '', separationProgress: null });
+    setProgress({ modelProgress: 0, modelMessage: '', separationProgress: null, transcriptionProgress: null });
     if (originalUrl) {
       URL.revokeObjectURL(originalUrl);
       setOriginalUrl('');
     }
   }, [originalUrl]);
+
+  const handleTranscribe = useCallback(async () => {
+    // Find vocals result
+    const vocalsResult = results.find(r => r.stemName === 'Vocals');
+    if (!vocalsResult) {
+      setErrorMsg('Vocals not found. Please separate audio first.');
+      return;
+    }
+
+    setIsTranscribing(true);
+    setMidiData(null);
+    setErrorMsg('');
+
+    try {
+      const midi = await transcribeAudio(
+        vocalsResult.audioBuffer,
+        (transcriptionProgress) => {
+          setProgress(prev => ({
+            ...prev,
+            transcriptionProgress,
+          }));
+        }
+      );
+
+      setMidiData(midi);
+    } catch (err) {
+      console.error('Transcription failed:', err);
+      setErrorMsg(`Transcription failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, [results]);
 
   // Memoize blob URLs for results
   const resultUrls = useMemo(() => {
@@ -309,20 +349,32 @@ function App() {
                       <span className="text-lg">{icons[result.stemName] || '🎵'}</span>
                       <span className="font-medium text-white">{result.stemName}</span>
                     </div>
-                    <button
-                      onClick={() => {
-                        const blob = new Blob([result.wavData], { type: 'audio/wav' });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_${result.stemName.toLowerCase()}.wav`;
-                        a.click();
-                        URL.revokeObjectURL(url);
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-green-500/20 hover:bg-green-500/30 text-green-400 text-sm font-medium transition-colors border border-green-500/30"
-                    >
-                      ⬇️ Download WAV
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {/* MIDI transcription button for vocals */}
+                      {result.stemName === 'Vocals' && (
+                        <button
+                          onClick={handleTranscribe}
+                          disabled={isTranscribing}
+                          className="px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 text-sm font-medium transition-colors border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isTranscribing ? '🎼 Transcribing...' : '🎼 Create MIDI'}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          const blob = new Blob([result.wavData], { type: 'audio/wav' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_${result.stemName.toLowerCase()}.wav`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-green-500/20 hover:bg-green-500/30 text-green-400 text-sm font-medium transition-colors border border-green-500/30"
+                      >
+                        ⬇️ Download WAV
+                      </button>
+                    </div>
                   </div>
                   <AudioPlayer 
                     audioUrl={resultUrls[idx]} 
@@ -332,6 +384,38 @@ function App() {
                 </div>
               );
             })}
+
+            {/* Transcription progress */}
+            {isTranscribing && progress.transcriptionProgress && (
+              <div className="p-4 rounded-xl bg-purple-500/10 border border-purple-500/20">
+                <ProgressBar
+                  progress={progress.transcriptionProgress.progress}
+                  message={progress.transcriptionProgress.message}
+                  variant="separation"
+                />
+              </div>
+            )}
+
+            {/* MIDI download */}
+            {midiData && (
+              <div className="p-4 rounded-xl bg-purple-500/10 border border-purple-500/20">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-2xl">🎼</span>
+                    <div>
+                      <p className="font-medium text-white">MIDI Transcription Ready!</p>
+                      <p className="text-sm text-gray-400">Click to download the MIDI file</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => downloadMidi(midiData, `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_vocals.mid`)}
+                    className="px-4 py-2 rounded-lg bg-purple-500/30 hover:bg-purple-500/40 text-purple-300 font-medium transition-colors border border-purple-500/40"
+                  >
+                    ⬇️ Download MIDI
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
