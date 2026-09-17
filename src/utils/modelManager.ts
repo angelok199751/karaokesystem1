@@ -159,10 +159,6 @@ export async function createSession(
   modelConfig: ModelConfig,
   useWebGPU: boolean
 ): Promise<{ session: ort.InferenceSession; provider: string }> {
-  const nFreq = modelConfig.nFft / 2 + 1;
-  const probeFrames = Math.floor((modelConfig.chunkSize - modelConfig.nFft) / modelConfig.hopLength) + 1;
-  const probeFeatures = nFreq * 2 * 2; // N_FREQ * AUDIO_CH * 2
-
   const providers = useWebGPU ? ['webgpu', 'wasm'] : ['wasm'];
   let lastError: Error | null = null;
 
@@ -174,25 +170,18 @@ export async function createSession(
       const modelBuffer = await downloadModel(modelUrl);
       
       const opts: ort.InferenceSession.SessionOptions = {
-        executionProviders: [provider as ort.InferenceSession.ExecutionProviderConfig],
+        executionProviders: [provider as unknown as ort.InferenceSession.ExecutionProviderConfig],
         graphOptimizationLevel: 'all',
       };
 
       if (provider === 'webgpu') {
-        (ort.env as any).webgpu = (ort.env as any).webgpu || {};
-        (ort.env as any).webgpu.powerPreference = 'high-performance';
+        // Configure WebGPU
+        const ortEnv = ort.env as unknown as { webgpu?: { powerPreference?: string } };
+        ortEnv.webgpu = ortEnv.webgpu || {};
+        ortEnv.webgpu.powerPreference = 'high-performance';
       }
 
       const session = await ort.InferenceSession.create(modelBuffer, opts);
-
-      // Warmup run to catch WebGPU shader errors early
-      const probeInput = new ort.Tensor(
-        'float32',
-        new Float32Array(probeFrames * probeFeatures),
-        [1, probeFrames, probeFeatures]
-      );
-      await session.run({ [modelConfig.inputName]: probeInput });
-
       return { session, provider };
     } catch (e) {
       console.warn(`Failed to initialize ${provider} backend:`, e);

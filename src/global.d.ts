@@ -19,11 +19,8 @@ interface GPUDeviceDescriptor {
   requiredLimits?: Record<string, number>;
 }
 
-interface GPUDevice extends EventTarget {
-  // Basic GPU device interface
-}
+interface GPUDevice extends EventTarget {}
 
-// Extend Navigator
 interface Navigator {
   readonly gpu?: GPU;
 }

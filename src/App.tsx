@@ -38,7 +38,7 @@ function App() {
   useEffect(() => {
     checkWebGPUAvailability().then(setWebgpuAvailable);
     
-    // Load WASM from CDN (not bundled)
+    // Load WASM from CDN — version MUST match installed npm package (1.21.0)
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
     ort.env.logLevel = 'warning';
