@@ -1,7 +1,9 @@
 /**
- * Enhanced audio separation using classical signal processing
- * Combines Center Channel Extraction + Frequency-based filtering + Spectral analysis
+ * Audio separation using BS-Roformer-SW 6-stem ONNX model
+ * Specially prepared for browser inference via onnxruntime-web
  */
+import * as ort from 'onnxruntime-web';
+import { ModelConfig } from './modelManager';
 
 export interface SeparationResult {
   stemName: string;
@@ -13,352 +15,424 @@ export interface SeparationProgress {
   stage: 'preparing' | 'processing' | 'reconstructing' | 'done';
   progress: number;
   message: string;
+  chunk?: number;
+  totalChunks?: number;
+  elapsed?: number;
+  eta?: number;
 }
 
-// ── FFT Implementation ─────────────────────────────────────────────────────
+// ── DSP: Hann window, STFT, iSTFT ──────────────────────────────────────────
 
-function fft(re: Float32Array, im: Float32Array, inverse: boolean = false): void {
-  const N = re.length;
-  
+function hannWindow(len: number): Float32Array {
+  const w = new Float32Array(len);
+  for (let i = 0; i < len; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / len));
+  return w;
+}
+
+/** Radix-2 Cooley-Tukey FFT (in-place) */
+function fftInPlace(re: Float32Array, im: Float32Array, N: number): void {
   // Bit-reversal permutation
-  let j = 0;
-  for (let i = 0; i < N - 1; i++) {
+  for (let i = 1, j = 0; i < N; i++) {
+    let bit = N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
     if (i < j) {
-      [re[i], re[j]] = [re[j], re[i]];
-      [im[i], im[j]] = [im[j], im[i]];
+      let tmp = re[i]; re[i] = re[j]; re[j] = tmp;
+      tmp = im[i]; im[i] = im[j]; im[j] = tmp;
     }
-    let k = N >> 1;
-    while (k <= j) {
-      j -= k;
-      k >>= 1;
-    }
-    j += k;
   }
-
-  // Cooley-Tukey FFT
-  for (let size = 2; size <= N; size *= 2) {
-    const halfSize = size / 2;
-    const angle = (inverse ? 1 : -1) * (2 * Math.PI) / size;
-    const wRe = Math.cos(angle);
-    const wIm = Math.sin(angle);
-
-    for (let i = 0; i < N; i += size) {
-      let curRe = 1;
-      let curIm = 0;
-
-      for (let k = 0; k < halfSize; k++) {
-        const idx1 = i + k;
-        const idx2 = i + k + halfSize;
-
-        const tRe = curRe * re[idx2] - curIm * im[idx2];
-        const tIm = curRe * im[idx2] + curIm * re[idx2];
-
-        re[idx2] = re[idx1] - tRe;
-        im[idx2] = im[idx1] - tIm;
-        re[idx1] = re[idx1] + tRe;
-        im[idx1] = im[idx1] + tIm;
-
+  // FFT butterflies
+  for (let len = 2; len <= N; len <<= 1) {
+    const half = len >> 1;
+    const angle = -2 * Math.PI / len;
+    const wRe = Math.cos(angle), wIm = Math.sin(angle);
+    for (let i = 0; i < N; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let j = 0; j < half; j++) {
+        const a = i + j, b = i + j + half;
+        const tRe = curRe * re[b] - curIm * im[b];
+        const tIm = curRe * im[b] + curIm * re[b];
+        re[b] = re[a] - tRe; im[b] = im[a] - tIm;
+        re[a] += tRe; im[a] += tIm;
         const newCurRe = curRe * wRe - curIm * wIm;
         curIm = curRe * wIm + curIm * wRe;
         curRe = newCurRe;
       }
     }
   }
-
-  if (inverse) {
-    for (let i = 0; i < N; i++) {
-      re[i] /= N;
-      im[i] /= N;
-    }
-  }
 }
 
-// ── STFT/iSTFT ─────────────────────────────────────────────────────────────
-
-function hannWindow(size: number): Float32Array {
-  const window = new Float32Array(size);
-  for (let i = 0; i < size; i++) {
-    window[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (size - 1)));
-  }
-  return window;
-}
-
-interface STFTResult {
-  real: Float32Array[];
-  imag: Float32Array[];
-  numFrames: number;
-  numFreqs: number;
-}
-
-function stft(signal: Float32Array, nFft: number, hopLength: number): STFTResult {
-  const window = hannWindow(nFft);
-  const numFrames = Math.floor((signal.length - nFft) / hopLength) + 1;
-  const numFreqs = Math.floor(nFft / 2) + 1;
+/** Real FFT with center padding (matches PyTorch stft center=True) */
+function stftCenter(signal: Float32Array, nFft: number, hop: number, win: Float32Array): { real: Float32Array[]; imag: Float32Array[]; numFrames: number } {
+  const nFreq = nFft / 2 + 1;
+  const padLength = nFft / 2;
   
+  // Pad signal with reflection (center=True)
+  const padded = new Float32Array(signal.length + 2 * padLength);
+  for (let i = 0; i < padLength; i++) {
+    padded[padLength - 1 - i] = signal[i];
+    padded[padLength + signal.length + i] = signal[signal.length - 1 - i];
+  }
+  padded.set(signal, padLength);
+  
+  const numFrames = Math.floor((padded.length - nFft) / hop) + 1;
   const real: Float32Array[] = [];
   const imag: Float32Array[] = [];
-
-  for (let frame = 0; frame < numFrames; frame++) {
+  
+  for (let t = 0; t < numFrames; t++) {
     const frameRe = new Float32Array(nFft);
     const frameIm = new Float32Array(nFft);
-    const start = frame * hopLength;
-
-    for (let i = 0; i < nFft && (start + i) < signal.length; i++) {
-      frameRe[i] = signal[start + i] * window[i];
+    const off = t * hop;
+    
+    for (let i = 0; i < nFft; i++) {
+      frameRe[i] = padded[off + i] * win[i];
     }
-
-    fft(frameRe, frameIm, false);
-
-    const posRe = new Float32Array(numFreqs);
-    const posIm = new Float32Array(numFreqs);
-    for (let i = 0; i < numFreqs; i++) {
-      posRe[i] = frameRe[i];
-      posIm[i] = frameIm[i];
+    
+    fftInPlace(frameRe, frameIm, nFft);
+    
+    const posRe = new Float32Array(nFreq);
+    const posIm = new Float32Array(nFreq);
+    for (let f = 0; f < nFreq; f++) {
+      posRe[f] = frameRe[f];
+      posIm[f] = frameIm[f];
     }
-
+    
     real.push(posRe);
     imag.push(posIm);
   }
-
-  return { real, imag, numFrames, numFreqs };
+  
+  return { real, imag, numFrames };
 }
 
-function istft(stftResult: STFTResult, nFft: number, hopLength: number, outputLength: number): Float32Array {
-  const { real, imag, numFrames } = stftResult;
-  const window = hannWindow(nFft);
+/** Inverse STFT with center padding removal */
+function istftCenter(real: Float32Array[], imag: Float32Array[], nFft: number, hop: number, win: Float32Array, originalLength: number): Float32Array {
+  const numFrames = real.length;
+  const padLength = nFft / 2;
+  const paddedLength = originalLength + 2 * padLength;
   
-  const output = new Float32Array(outputLength);
-  const windowSum = new Float32Array(outputLength);
-
-  for (let frame = 0; frame < numFrames; frame++) {
+  const output = new Float32Array(paddedLength);
+  const winSum = new Float32Array(paddedLength);
+  
+  for (let t = 0; t < numFrames; t++) {
     const frameRe = new Float32Array(nFft);
     const frameIm = new Float32Array(nFft);
-    const start = frame * hopLength;
-
-    const numFreqs = real[frame].length;
-    for (let i = 0; i < numFreqs; i++) {
-      frameRe[i] = real[frame][i];
-      frameIm[i] = imag[frame][i];
+    const nFreq = real[t].length;
+    
+    for (let f = 0; f < nFreq; f++) {
+      frameRe[f] = real[t][f];
+      frameIm[f] = imag[t][f];
     }
-    for (let i = 1; i < nFft - numFreqs + 1; i++) {
-      frameRe[nFft - i] = real[frame][i];
-      frameIm[nFft - i] = -imag[frame][i];
+    for (let f = 1; f < nFreq; f++) {
+      frameRe[nFft - f] = real[t][f];
+      frameIm[nFft - f] = -imag[t][f];
     }
-
-    fft(frameRe, frameIm, true);
-
-    for (let i = 0; i < nFft && (start + i) < outputLength; i++) {
-      output[start + i] += frameRe[i] * window[i];
-      windowSum[start + i] += window[i] * window[i];
-    }
-  }
-
-  for (let i = 0; i < outputLength; i++) {
-    if (windowSum[i] > 1e-8) {
-      output[i] /= windowSum[i];
+    
+    fftInPlace(frameRe, frameIm, nFft);
+    
+    const off = t * hop;
+    for (let i = 0; i < nFft && off + i < paddedLength; i++) {
+      output[off + i] += frameRe[i] * win[i];
+      winSum[off + i] += win[i] * win[i];
     }
   }
-
-  return output;
+  
+  // Normalize
+  for (let i = 0; i < paddedLength; i++) {
+    if (winSum[i] > 1e-8) {
+      output[i] /= winSum[i];
+    }
+  }
+  
+  // Remove padding
+  return output.slice(padLength, padLength + originalLength);
 }
 
-// ── Enhanced Separation ────────────────────────────────────────────────────
+// ── Prepare model input ────────────────────────────────────────────────────
 
-/**
- * Enhanced separation using:
- * 1. Center Channel Extraction (base)
- * 2. Frequency-based spectral masking
- * 3. Phase correlation analysis
- */
+interface ChunkInput {
+  specReal: Float32Array;  // [1, 2, 1025, T]
+  specImag: Float32Array;  // [1, 2, 1025, T]
+  numFrames: number;
+  stftL: { real: Float32Array[]; imag: Float32Array[] };
+  stftR: { real: Float32Array[]; imag: Float32Array[] };
+}
+
+function prepareChunkInput(
+  left: Float32Array,
+  right: Float32Array,
+  win: Float32Array,
+  nFft: number,
+  hop: number
+): ChunkInput {
+  const nFreq = nFft / 2 + 1;
+  
+  // STFT for both channels
+  const stftL = stftCenter(left, nFft, hop, win);
+  const stftR = stftCenter(right, nFft, hop, win);
+  
+  const numFrames = stftL.numFrames;
+  
+  // Create tensors [1, 2, 1025, T]
+  const specReal = new Float32Array(2 * nFreq * numFrames);
+  const specImag = new Float32Array(2 * nFreq * numFrames);
+  
+  for (let t = 0; t < numFrames; t++) {
+    for (let f = 0; f < nFreq; f++) {
+      // Channel 0 (left)
+      specReal[0 * nFreq * numFrames + f * numFrames + t] = stftL.real[t][f];
+      specImag[0 * nFreq * numFrames + f * numFrames + t] = stftL.imag[t][f];
+      // Channel 1 (right)
+      specReal[1 * nFreq * numFrames + f * numFrames + t] = stftR.real[t][f];
+      specImag[1 * nFreq * numFrames + f * numFrames + t] = stftR.imag[t][f];
+    }
+  }
+  
+  return { specReal, specImag, numFrames, stftL, stftR };
+}
+
+// ── Apply model output and iSTFT ───────────────────────────────────────────
+
+interface StemAudio {
+  left: Float32Array;
+  right: Float32Array;
+}
+
+function reconstructStems(
+  outSpecReal: Float32Array,
+  outSpecImag: Float32Array,
+  numFrames: number,
+  win: Float32Array,
+  nFft: number,
+  hop: number,
+  numStems: number,
+  originalLength: number
+): StemAudio[] {
+  const nFreq = nFft / 2 + 1;
+  const stems: StemAudio[] = [];
+  
+  for (let stem = 0; stem < numStems; stem++) {
+    // Extract this stem's spectrograms [2, 1025, T]
+    const stemRealL: Float32Array[] = [];
+    const stemImagL: Float32Array[] = [];
+    const stemRealR: Float32Array[] = [];
+    const stemImagR: Float32Array[] = [];
+    
+    for (let t = 0; t < numFrames; t++) {
+      const reL = new Float32Array(nFreq);
+      const imL = new Float32Array(nFreq);
+      const reR = new Float32Array(nFreq);
+      const imR = new Float32Array(nFreq);
+      
+      for (let f = 0; f < nFreq; f++) {
+        const baseIdx = stem * 2 * nFreq * numFrames + f * numFrames + t;
+        reL[f] = outSpecReal[baseIdx];
+        imL[f] = outSpecImag[baseIdx];
+        reR[f] = outSpecReal[baseIdx + nFreq * numFrames];
+        imR[f] = outSpecImag[baseIdx + nFreq * numFrames];
+      }
+      
+      stemRealL.push(reL);
+      stemImagL.push(imL);
+      stemRealR.push(reR);
+      stemImagR.push(imR);
+    }
+    
+    // iSTFT for both channels
+    const left = istftCenter(stemRealL, stemImagL, nFft, hop, win, originalLength);
+    const right = istftCenter(stemRealR, stemImagR, nFft, hop, win, originalLength);
+    
+    stems.push({ left, right });
+  }
+  
+  return stems;
+}
+
+// ── Resample ────────────────────────────────────────────────────────────────
+
+function resample(audioData: Float32Array, fromRate: number, toRate: number): Float32Array {
+  if (fromRate === toRate) {
+    const copy = new Float32Array(audioData.length);
+    copy.set(audioData);
+    return copy;
+  }
+  const ratio = fromRate / toRate;
+  const newLength = Math.round(audioData.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const srcIndex = i * ratio;
+    const floor = Math.floor(srcIndex);
+    const ceil = Math.min(floor + 1, audioData.length - 1);
+    const frac = srcIndex - floor;
+    result[i] = audioData[floor] * (1 - frac) + audioData[ceil] * frac;
+  }
+  return result;
+}
+
+// ── Main separation pipeline ────────────────────────────────────────────────
+
 export async function separateAudio(
   audioBuffer: AudioBuffer,
+  modelConfig: ModelConfig,
+  session: ort.InferenceSession,
   onProgress?: (progress: SeparationProgress) => void
 ): Promise<SeparationResult[]> {
-  onProgress?.({ stage: 'preparing', progress: 0, message: 'Analyzing audio...' });
-
-  if (audioBuffer.numberOfChannels < 2) {
-    throw new Error('Enhanced separation requires stereo audio. Please use a stereo audio file.');
-  }
-
-  const sampleRate = audioBuffer.sampleRate;
-  const length = audioBuffer.length;
+  const originalSampleRate = audioBuffer.sampleRate;
+  const numStems = modelConfig.stems.length;
   
+  onProgress?.({ stage: 'preparing', progress: 0, message: 'Preparing audio...' });
+
+  // Get stereo channels
   const left = audioBuffer.getChannelData(0);
-  const right = audioBuffer.getChannelData(1);
+  const right = audioBuffer.numberOfChannels > 1 
+    ? audioBuffer.getChannelData(1) 
+    : audioBuffer.getChannelData(0);
 
-  onProgress?.({ stage: 'processing', progress: 10, message: 'Computing spectrograms...' });
+  // Resample to model's sample rate if needed
+  const procLeft = modelConfig.sampleRate !== originalSampleRate
+    ? resample(left, originalSampleRate, modelConfig.sampleRate)
+    : new Float32Array(left);
+  const procRight = modelConfig.sampleRate !== originalSampleRate
+    ? resample(right, originalSampleRate, modelConfig.sampleRate)
+    : new Float32Array(right);
 
-  // STFT parameters
-  const nFft = 2048;
-  const hopLength = 512;
-
-  // Compute STFT for both channels
-  const stftL = stft(left, nFft, hopLength);
-  const stftR = stft(right, nFft, hopLength);
-
-  onProgress?.({ stage: 'processing', progress: 30, message: 'Analyzing phase correlation...' });
-
-  // Compute magnitude and phase for both channels
-  const numFrames = stftL.numFrames;
-  const numFreqs = stftL.numFreqs;
-
-  const magL: Float32Array[] = [];
-  const magR: Float32Array[] = [];
-  const phaseL: Float32Array[] = [];
-  const phaseR: Float32Array[] = [];
-
-  for (let frame = 0; frame < numFrames; frame++) {
-    const mRe = new Float32Array(numFreqs);
-    const mIm = new Float32Array(numFreqs);
-    const pRe = new Float32Array(numFreqs);
-    const pIm = new Float32Array(numFreqs);
-
-    for (let freq = 0; freq < numFreqs; freq++) {
-      const reL = stftL.real[frame][freq];
-      const imL = stftL.imag[frame][freq];
-      const reR = stftR.real[frame][freq];
-      const imR = stftR.imag[frame][freq];
-
-      mRe[freq] = Math.sqrt(reL * reL + imL * imL);
-      mIm[freq] = Math.sqrt(reR * reR + imR * imR);
-      pRe[freq] = Math.atan2(imL, reL);
-      pIm[freq] = Math.atan2(imR, reR);
-    }
-
-    magL.push(mRe);
-    magR.push(mIm);
-    phaseL.push(pRe);
-    phaseR.push(pIm);
+  const totalSamples = procLeft.length;
+  const win = hannWindow(modelConfig.winLength);
+  
+  // Calculate chunk positions with overlap
+  const step = Math.floor(modelConfig.chunkSamples / modelConfig.overlap);
+  const starts: number[] = [];
+  for (let s = 0; s < totalSamples; s += step) {
+    starts.push(s);
   }
 
-  onProgress?.({ stage: 'processing', progress: 50, message: 'Creating vocal mask...' });
-
-  // Create vocal mask using multiple criteria:
-  // 1. Center channel (L+R similarity)
-  // 2. Phase correlation (similar phase = center)
-  // 3. Frequency weighting (vocals typically 200Hz-4kHz)
+  // Accumulators for overlap-add (for each stem)
+  const stemAccumL: Float32Array[] = [];
+  const stemAccumR: Float32Array[] = [];
+  const count = new Float32Array(totalSamples);
   
-  const vocalMask: Float32Array[] = [];
-  const nyquist = sampleRate / 2;
+  for (let s = 0; s < numStems; s++) {
+    stemAccumL.push(new Float32Array(totalSamples));
+    stemAccumR.push(new Float32Array(totalSamples));
+  }
 
-  for (let frame = 0; frame < numFrames; frame++) {
-    const mask = new Float32Array(numFreqs);
+  const t0 = performance.now();
 
-    for (let freq = 0; freq < numFreqs; freq++) {
-      const freqHz = (freq / numFreqs) * nyquist;
-      
-      // 1. Center channel strength (magnitude similarity)
-      const magAvg = (magL[frame][freq] + magR[frame][freq]) / 2;
-      const magDiff = Math.abs(magL[frame][freq] - magR[frame][freq]);
-      const centerStrength = magAvg > 0 ? 1 - (magDiff / (magAvg + 1e-10)) : 0;
-      
-      // 2. Phase correlation (similar phase = center)
-      const phaseDiff = Math.abs(phaseL[frame][freq] - phaseR[frame][freq]);
-      const phaseCorr = Math.cos(phaseDiff); // 1 = same phase, -1 = opposite
-      
-      // 3. Frequency weighting for vocals (200Hz - 4kHz)
-      let freqWeight = 0;
-      if (freqHz >= 200 && freqHz <= 4000) {
-        // Smooth bell curve centered around 1kHz
-        const center = 1000;
-        const width = 1500;
-        freqWeight = Math.exp(-Math.pow((freqHz - center) / width, 2));
-      } else if (freqHz < 200) {
-        // Low frequencies - less likely to be vocals
-        freqWeight = 0.2;
-      } else {
-        // High frequencies - less likely to be vocals
-        freqWeight = 0.3;
+  for (let ci = 0; ci < starts.length; ci++) {
+    const start = starts[ci];
+    const end = Math.min(start + modelConfig.chunkSamples, totalSamples);
+    const chunkLen = end - start;
+
+    // Extract & pad chunk
+    const cL = new Float32Array(modelConfig.chunkSamples);
+    const cR = new Float32Array(modelConfig.chunkSamples);
+    cL.set(procLeft.subarray(start, end));
+    cR.set(procRight.subarray(start, end));
+
+    // STFT & prepare input
+    const { specReal, specImag, numFrames } = prepareChunkInput(
+      cL, cR, win, modelConfig.nFft, modelConfig.hopLength
+    );
+
+    // Run ONNX inference
+    const inputReal = new ort.Tensor('float32', specReal, [1, 2, 1025, numFrames]);
+    const inputImag = new ort.Tensor('float32', specImag, [1, 2, 1025, numFrames]);
+    
+    const feeds: Record<string, ort.Tensor> = {};
+    feeds[modelConfig.inputNames[0]] = inputReal;
+    feeds[modelConfig.inputNames[1]] = inputImag;
+    
+    const results = await session.run(feeds);
+    
+    const outSpecReal = results[modelConfig.outputNames[0]].data as Float32Array;
+    const outSpecImag = results[modelConfig.outputNames[1]].data as Float32Array;
+
+    // Reconstruct stems
+    const stems = reconstructStems(
+      outSpecReal, outSpecImag, numFrames, win,
+      modelConfig.nFft, modelConfig.hopLength, numStems, modelConfig.chunkSamples
+    );
+
+    // Accumulate with overlap
+    for (let s = 0; s < numStems; s++) {
+      for (let i = 0; i < chunkLen; i++) {
+        stemAccumL[s][start + i] += stems[s].left[i];
+        stemAccumR[s][start + i] += stems[s].right[i];
       }
-
-      // Combine all criteria
-      const combinedMask = (centerStrength * 0.5 + phaseCorr * 0.3 + 0.2) * (0.5 + freqWeight * 0.5);
-      mask[freq] = Math.max(0, Math.min(1, combinedMask));
+    }
+    for (let i = 0; i < chunkLen; i++) {
+      count[start + i] += 1;
     }
 
-    vocalMask.push(mask);
+    // Progress
+    const frac = (ci + 1) / starts.length;
+    const elapsed = (performance.now() - t0) / 1000;
+    const eta = elapsed / frac * (1 - frac);
+    
+    onProgress?.({
+      stage: 'processing',
+      progress: Math.round(frac * 100),
+      message: `Chunk ${ci + 1}/${starts.length} · ${elapsed.toFixed(1)}s elapsed · ~${eta.toFixed(0)}s remaining`,
+      chunk: ci + 1,
+      totalChunks: starts.length,
+      elapsed,
+      eta,
+    });
+
+    // Yield to UI
+    await new Promise(r => setTimeout(r, 0));
   }
 
-  onProgress?.({ stage: 'processing', progress: 70, message: 'Applying masks and reconstructing...' });
-
-  // Apply masks to create separated spectrograms
-  const vocalsReal: Float32Array[] = [];
-  const vocalsImag: Float32Array[] = [];
-  const instrReal: Float32Array[] = [];
-  const instrImag: Float32Array[] = [];
-
-  for (let frame = 0; frame < numFrames; frame++) {
-    const vRe = new Float32Array(numFreqs);
-    const vIm = new Float32Array(numFreqs);
-    const iRe = new Float32Array(numFreqs);
-    const iIm = new Float32Array(numFreqs);
-
-    for (let freq = 0; freq < numFreqs; freq++) {
-      const mask = vocalMask[frame][freq];
-      
-      // Center channel for vocals
-      const centerRe = (stftL.real[frame][freq] + stftR.real[frame][freq]) / 2;
-      const centerIm = (stftL.imag[frame][freq] + stftR.imag[frame][freq]) / 2;
-      
-      // Apply vocal mask
-      vRe[freq] = centerRe * mask;
-      vIm[freq] = centerIm * mask;
-      
-      // Instrumental = original - vocals
-      const avgRe = (stftL.real[frame][freq] + stftR.real[frame][freq]) / 2;
-      const avgIm = (stftL.imag[frame][freq] + stftR.imag[frame][freq]) / 2;
-      iRe[freq] = avgRe - vRe[freq];
-      iIm[freq] = avgIm - vIm[freq];
+  // Average overlaps
+  for (let s = 0; s < numStems; s++) {
+    for (let i = 0; i < totalSamples; i++) {
+      if (count[i] > 0) {
+        stemAccumL[s][i] /= count[i];
+        stemAccumR[s][i] /= count[i];
+      }
     }
-
-    vocalsReal.push(vRe);
-    vocalsImag.push(vIm);
-    instrReal.push(iRe);
-    instrImag.push(iIm);
   }
 
-  // Reconstruct audio using iSTFT
-  const vocalsMono = istft({ real: vocalsReal, imag: vocalsImag, numFrames, numFreqs }, nFft, hopLength, length);
-  const instrMono = istft({ real: instrReal, imag: instrImag, numFrames, numFreqs }, nFft, hopLength, length);
+  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Resampling and encoding...' });
 
-  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Building stereo output...' });
-
-  // Create stereo output (duplicate mono to both channels)
-  const vocalsL = new Float32Array(vocalsMono.length);
-  vocalsL.set(vocalsMono);
-  const vocalsR = new Float32Array(vocalsMono.length);
-  vocalsR.set(vocalsMono);
-  const instrL = new Float32Array(instrMono.length);
-  instrL.set(instrMono);
-  const instrR = new Float32Array(instrMono.length);
-  instrR.set(instrMono);
-
-  // Create AudioBuffers
-  const vocalsCtx = new OfflineAudioContext(2, length, sampleRate);
-  const vocalsBuf = vocalsCtx.createBuffer(2, length, sampleRate);
-  vocalsBuf.copyToChannel(vocalsL, 0);
-  vocalsBuf.copyToChannel(vocalsR, 1);
-
-  const instrCtx = new OfflineAudioContext(2, length, sampleRate);
-  const instrBuf = instrCtx.createBuffer(2, length, sampleRate);
-  instrBuf.copyToChannel(instrL, 0);
-  instrBuf.copyToChannel(instrR, 1);
-
-  onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Encoding WAV files...' });
-
-  // Encode to WAV
-  const vocalsStereo = interleaveStereo(vocalsL, vocalsR);
-  const instrStereo = interleaveStereo(instrL, instrR);
+  // Resample back to original sample rate if needed
+  const finalResults: SeparationResult[] = [];
   
-  const vocalsWav = encodeStereoWAV(vocalsStereo, sampleRate);
-  const instrWav = encodeStereoWAV(instrStereo, sampleRate);
+  for (let s = 0; s < numStems; s++) {
+    let stemL = stemAccumL[s];
+    let stemR = stemAccumR[s];
+
+    if (modelConfig.sampleRate !== originalSampleRate) {
+      stemL = resample(stemL, modelConfig.sampleRate, originalSampleRate);
+      stemR = resample(stemR, modelConfig.sampleRate, originalSampleRate);
+    }
+
+    // Trim to original length
+    const origLen = audioBuffer.length;
+    if (stemL.length > origLen) {
+      stemL = stemL.slice(0, origLen);
+      stemR = stemR.slice(0, origLen);
+    }
+
+    // Create AudioBuffer
+    const ctx = new OfflineAudioContext(2, stemL.length, originalSampleRate);
+    const buf = ctx.createBuffer(2, stemL.length, originalSampleRate);
+    buf.copyToChannel(new Float32Array(stemL), 0);
+    buf.copyToChannel(new Float32Array(stemR), 1);
+
+    // Encode to WAV
+    const stereo = interleaveStereo(stemL, stemR);
+    const wav = encodeStereoWAV(stereo, originalSampleRate);
+
+    finalResults.push({
+      stemName: modelConfig.stems[s],
+      audioBuffer: buf,
+      wavData: wav,
+    });
+  }
 
   onProgress?.({ stage: 'done', progress: 100, message: 'Done!' });
 
-  return [
-    { stemName: 'Vocals', audioBuffer: vocalsBuf, wavData: vocalsWav },
-    { stemName: 'Instrumental', audioBuffer: instrBuf, wavData: instrWav },
-  ];
+  return finalResults;
 }
 
 function interleaveStereo(left: Float32Array, right: Float32Array): Float32Array {
