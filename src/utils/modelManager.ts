@@ -1,6 +1,6 @@
 /**
  * Model manager: handles downloading, caching, and loading ONNX models
- * Using bgkb/bs_polarformer - a real working model for browser-based vocal separation
+ * Using UVR-MDX-NET models from GitHub Releases - works in Russia without VPN
  */
 import * as ort from 'onnxruntime-web';
 
@@ -8,8 +8,7 @@ export interface ModelConfig {
   id: string;
   name: string;
   description: string;
-  wasmUrl: string;
-  webgpuUrl: string;
+  url: string;
   size: string;
   stems: string[];
   // Audio processing params
@@ -24,46 +23,61 @@ export interface ModelConfig {
   outputName: string;
 }
 
-const HF_BASE = 'https://huggingface.co/bgkb/bs_polarformer/resolve/main';
+// GitHub Releases URL - works in Russia without VPN
+const GITHUB_BASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models';
 
 export const MODELS: ModelConfig[] = [
   {
-    id: 'bs-polarformer-fp16',
-    name: 'BS PolarFormer FP16 (Recommended)',
-    description: 'High-quality vocal separation. 103MB. Best balance of quality and speed.',
-    wasmUrl: `${HF_BASE}/bs_polarformer_fp16.onnx`,
-    webgpuUrl: `${HF_BASE}/bs_polarformer_webgpu_fp16.onnx`,
-    size: '~103 MB',
+    id: 'uvr-mdxnet-9482',
+    name: 'UVR-MDX-NET 9482 (Fast)',
+    description: 'Fast vocal separation. 28MB. Good balance of speed and quality.',
+    url: `${GITHUB_BASE}/UVR_MDXNET_9482.onnx`,
+    size: '~28 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 2048,
-    hopLength: 512,
-    winLength: 2048,
-    chunkSize: 131072,
+    nFft: 768,
+    hopLength: 384,
+    winLength: 768,
+    chunkSize: 262144, // ~6 seconds
     overlap: 2,
-    inputName: 'stft_features',
-    outputName: 'mask',
+    inputName: 'input',
+    outputName: 'output',
   },
   {
-    id: 'bs-polarformer-fp32',
-    name: 'BS PolarFormer FP32 (Highest Quality)',
-    description: 'Maximum quality vocal separation. 201MB. Slower download but best results.',
-    wasmUrl: `${HF_BASE}/bs_polarformer.onnx`,
-    webgpuUrl: `${HF_BASE}/bs_polarformer_webgpu.onnx`,
-    size: '~201 MB',
+    id: 'uvr-mdxnet-voc-ft',
+    name: 'UVR-MDX-NET Voc_FT (Best Quality)',
+    description: 'High-quality vocal separation. 64MB. Best results.',
+    url: `${GITHUB_BASE}/UVR-MDX-NET-Voc_FT.onnx`,
+    size: '~64 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 2048,
+    nFft: 1024,
     hopLength: 512,
-    winLength: 2048,
-    chunkSize: 131072,
+    winLength: 1024,
+    chunkSize: 262144, // ~6 seconds
     overlap: 2,
-    inputName: 'stft_features',
-    outputName: 'mask',
+    inputName: 'input',
+    outputName: 'output',
+  },
+  {
+    id: 'uvr-mdxnet-inst-hq4',
+    name: 'UVR-MDX-NET Inst_HQ_4 (Alternative)',
+    description: 'Alternative high-quality model. 56MB. Different training.',
+    url: `${GITHUB_BASE}/UVR-MDX-NET-Inst_HQ_4.onnx`,
+    size: '~56 MB',
+    stems: ['Vocals', 'Instrumental'],
+    sampleRate: 44100,
+    nFft: 1024,
+    hopLength: 512,
+    winLength: 1024,
+    chunkSize: 262144, // ~6 seconds
+    overlap: 2,
+    inputName: 'input',
+    outputName: 'output',
   },
 ];
 
-const CACHE_NAME = 'audio-separator-models-v2';
+const CACHE_NAME = 'audio-separator-models-v3';
 
 export async function getCachedModel(modelUrl: string): Promise<ArrayBuffer | null> {
   try {
@@ -164,10 +178,8 @@ export async function createSession(
 
   for (const provider of providers) {
     try {
-      const modelUrl = provider === 'webgpu' ? modelConfig.webgpuUrl : modelConfig.wasmUrl;
-      
       // Download model
-      const modelBuffer = await downloadModel(modelUrl);
+      const modelBuffer = await downloadModel(modelConfig.url);
       
       const opts: ort.InferenceSession.SessionOptions = {
         executionProviders: [provider as unknown as ort.InferenceSession.ExecutionProviderConfig],
@@ -175,7 +187,6 @@ export async function createSession(
       };
 
       if (provider === 'webgpu') {
-        // Configure WebGPU
         const ortEnv = ort.env as unknown as { webgpu?: { powerPreference?: string } };
         ortEnv.webgpu = ortEnv.webgpu || {};
         ortEnv.webgpu.powerPreference = 'high-performance';
