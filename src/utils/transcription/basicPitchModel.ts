@@ -57,8 +57,45 @@ export async function runBasicPitchInference(
     throw new Error('Model not loaded. Call loadBasicPitchModel() first.');
   }
   
+  // Convert audio to spectrogram-like representation
+  // Basic Pitch expects input shape [1, 2281, 1, 1]
+  // We need to compute a simple magnitude spectrum
+  const fftSize = 2048;
+  const hopSize = 512;
+  const numFrames = Math.floor((audioWindow.length - fftSize) / hopSize) + 1;
+  const numBins = 228; // Frequency bins
+  
+  // Simple STFT magnitude
+  const spectrogram = new Float32Array(numFrames * numBins);
+  
+  for (let frame = 0; frame < numFrames; frame++) {
+    const start = frame * hopSize;
+    const frameData = audioWindow.slice(start, start + fftSize);
+    
+    // Apply Hann window
+    const windowed = new Float32Array(fftSize);
+    for (let i = 0; i < fftSize; i++) {
+      windowed[i] = frameData[i] * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / fftSize));
+    }
+    
+    // Simple FFT (magnitude only)
+    const fftResult = simpleFFT(windowed);
+    
+    // Take first numBins frequency bins
+    for (let bin = 0; bin < numBins; bin++) {
+      spectrogram[frame * numBins + bin] = fftResult[bin];
+    }
+  }
+  
+  // Reshape to [1, 2281, 1, 1] - flatten spectrogram
+  // 2281 = numFrames * numBins (approximately)
+  const inputData = new Float32Array(2281);
+  for (let i = 0; i < Math.min(spectrogram.length, 2281); i++) {
+    inputData[i] = spectrogram[i];
+  }
+  
   // Prepare input tensor
-  const inputTensor = new ort.Tensor('float32', audioWindow, [1, 1, 2281, 1]);
+  const inputTensor = new ort.Tensor('float32', inputData, [1, 2281, 1, 1]);
   
   // Run inference
   const feeds: Record<string, ort.Tensor> = {
@@ -73,6 +110,28 @@ export async function runBasicPitchInference(
   const onset = results['onset'].data as Float32Array;
   
   return { contour, note, onset };
+}
+
+// Simple FFT implementation (magnitude only)
+function simpleFFT(signal: Float32Array): Float32Array {
+  const N = signal.length;
+  const magnitudes = new Float32Array(N / 2);
+  
+  // DFT (simplified, not optimized)
+  for (let k = 0; k < N / 2; k++) {
+    let real = 0;
+    let imag = 0;
+    
+    for (let n = 0; n < N; n++) {
+      const angle = (2 * Math.PI * k * n) / N;
+      real += signal[n] * Math.cos(angle);
+      imag -= signal[n] * Math.sin(angle);
+    }
+    
+    magnitudes[k] = Math.sqrt(real * real + imag * imag) / N;
+  }
+  
+  return magnitudes;
 }
 
 export const BASIC_PITCH_CONFIG = {
