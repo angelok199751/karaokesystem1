@@ -1,6 +1,6 @@
 /**
- * Model manager for UVR-MDX-NET models
- * Lightweight vocal separation models (28-80 MB)
+ * HT-Demucs FT ONNX model manager
+ * Simple audio-to-audio separation (no manual STFT needed!)
  */
 import * as ort from 'onnxruntime-web';
 
@@ -11,16 +11,8 @@ export interface ModelConfig {
   url: string;
   size: string;
   stems: string[];
-  // Audio processing params
   sampleRate: number;
-  nFft: number;
-  hopLength: number;
-  winLength: number;
-  dimF: number;
-  dimT: number;
-  chunkSamples: number;
-  overlap: number;
-  // Model I/O
+  chunkSamples: number; // 343980 samples = 7.8s @ 44.1kHz
   inputName: string;
   outputName: string;
 }
@@ -30,44 +22,20 @@ const HF_BASE = 'https://huggingface.co';
 
 export const MODELS: ModelConfig[] = [
   {
-    id: 'uvr-mdxnet-9482',
-    name: 'UVR-MDX-NET 9482 (Fast)',
-    description: 'Fast vocal separation. 28MB. Good balance of speed and quality.',
-    url: `${HF_BASE}/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_9482.onnx`,
-    size: '~28 MB',
+    id: 'htdemucs-ft-vocals',
+    name: 'HT-Demucs FT Vocals (Best Quality)',
+    description: 'State-of-the-art vocal separation. SDR 9.19 dB. 316MB.',
+    url: `${HF_BASE}/StemSplitio/htdemucs-ft-vocals-onnx/resolve/main/htdemucs_ft_vocals.onnx`,
+    size: '~316 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 6144,
-    hopLength: 1024,
-    winLength: 6144,
-    dimF: 2048,
-    dimT: 8, // 2^8 = 256 frames
-    chunkSamples: 261120, // hop * (dim_t - 1) = 1024 * 255
-    overlap: 2,
-    inputName: 'input',
-    outputName: 'output',
-  },
-  {
-    id: 'uvr-mdxnet-voc-ft',
-    name: 'UVR-MDX-NET Voc_FT (Best Quality)',
-    description: 'High-quality vocal separation. 64MB. Best results.',
-    url: `${HF_BASE}/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx`,
-    size: '~64 MB',
-    stems: ['Vocals', 'Instrumental'],
-    sampleRate: 44100,
-    nFft: 6144,
-    hopLength: 1024,
-    winLength: 6144,
-    dimF: 2048,
-    dimT: 8,
-    chunkSamples: 261120,
-    overlap: 2,
-    inputName: 'input',
-    outputName: 'output',
+    chunkSamples: 343980, // 7.8s @ 44.1kHz
+    inputName: 'mix',
+    outputName: 'stems',
   },
 ];
 
-const CACHE_NAME = 'audio-separator-models-v4';
+const CACHE_NAME = 'audio-separator-models-v5';
 
 export async function getCachedModel(modelUrl: string): Promise<ArrayBuffer | null> {
   try {
@@ -108,7 +76,6 @@ export async function downloadModel(
   // Try multiple URLs (direct + mirror)
   const urlsToTry: string[] = [url];
   
-  // Add mirror URL
   if (url.includes('huggingface.co') && !url.includes('hf-mirror.com')) {
     const mirrorUrl = url.replace('https://huggingface.co', 'https://hf-mirror.com');
     urlsToTry.push(mirrorUrl);
@@ -147,7 +114,6 @@ export async function downloadModel(
         onProgress?.(loaded, total);
       }
 
-      // Combine chunks
       const result = new Uint8Array(loaded);
       let offset = 0;
       for (const chunk of chunks) {
@@ -155,9 +121,7 @@ export async function downloadModel(
         offset += chunk.length;
       }
 
-      // Cache the model
       await cacheModel(url, result.buffer);
-
       return result.buffer;
     } catch (e) {
       console.warn(`Failed to download from ${tryUrl}:`, e);
@@ -188,7 +152,6 @@ export async function createSession(
 
   for (const provider of providers) {
     try {
-      // Download model
       const modelBuffer = await downloadModel(modelConfig.url);
       
       const opts: ort.InferenceSession.SessionOptions = {

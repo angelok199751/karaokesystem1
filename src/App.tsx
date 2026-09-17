@@ -158,7 +158,7 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">Audio Separator</h1>
-              <p className="text-xs text-gray-400">UVR-MDX-NET — Fast vocal separation</p>
+              <p className="text-xs text-gray-400">HT-Demucs FT — State-of-the-art vocal separation</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -180,7 +180,7 @@ function App() {
         <div className="mb-8 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
           <p className="text-sm text-indigo-200">
             <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server. 
-            Models are cached locally after first download. Uses <strong>UVR-MDX-NET</strong> — fast and reliable vocal separation.
+            Models are cached locally after first download. Uses <strong>HT-Demucs FT</strong> — state-of-the-art vocal separation (SDR 9.19 dB).
           </p>
         </div>
 
@@ -360,7 +360,7 @@ function App() {
             </div>
             <div className="p-4 rounded-lg bg-white/5">
               <h4 className="font-medium text-gray-300 mb-1">🧠 Model</h4>
-              <p>UVR-MDX-NET — 28-64 MB. Fast vocal separation. MIT license.</p>
+              <p>HT-Demucs FT — 316 MB. Best vocal SDR (9.19 dB). MIT license.</p>
             </div>
           </div>
         </div>

@@ -5,30 +5,29 @@
 ## ✨ Возможности
 
 - 🔒 **100% приватность** — вся обработка происходит локально в браузере
-- 🧠 **UVR-MDX-NET** — быстрая и надёжная модель разделения вокала
+- 🧠 **HT-Demucs FT** — state-of-the-art модель разделения (SDR 9.19 dB для вокала)
 - 🎵 **2 дорожки** — Vocals и Instrumental
 - 🌐 **WebGPU + WASM** — использует WebGPU при наличии, fallback на WASM
 - 💾 **Кэширование** — модели кэшируются в CacheStorage после первой загрузки
 - ⬇️ **Экспорт** — скачивание результатов в WAV формате
 
-## 🧠 Модели
+## 🧠 Модель
 
-Используются **UVR-MDX-NET** — проверенные модели для разделения вокала:
+Используется **HT-Demucs FT** — первая полная ONNX-версия с проверенным паритетом:
 
-| Модель | Размер | Описание |
-|--------|--------|----------|
-| UVR-MDX-NET 9482 | 28 MB | Быстрая, хорошее качество |
-| UVR-MDX-NET Voc_FT | 64 MB | Высокое качество |
+| Модель | Размер | SDR (вокал) | Описание |
+|--------|--------|-------------|----------|
+| HT-Demucs FT Vocals | 316 MB | 9.19 dB | Лучший open-source результат |
 
 ### Выходы (2 stems):
-1. 🎤 **Vocals** — вокал
-2. 🎸 **Instrumental** — всё остальное
+1. 🎤 **Vocals** — вокал (SDR 9.19 dB)
+2. 🎸 **Instrumental** — drums + bass + other
 
-### Источник моделей:
-- **HuggingFace**: [Blane187/all_public_uvr_models](https://huggingface.co/Blane187/all_public_uvr_models)
+### Источник модели:
+- **HuggingFace**: [StemSplitio/htdemucs-ft-vocals-onnx](https://huggingface.co/StemSplitio/htdemucs-ft-vocals-onnx)
 - **Лицензия**: MIT
-- **Архитектура**: MDX-Net от kuielab
-- **Оптимизированы** для работы в браузере через onnxruntime-web
+- **Архитектура**: Hybrid Transformer Demucs от Facebook Research
+- **Паритет**: Проверен с PyTorch версией (< 1e-3 max abs diff)
 
 ## 🌐 Загрузка модели
 
@@ -112,35 +111,36 @@ src/
 
 ## 📊 Технические детали
 
-- **Модель:** UVR-MDX-NET (MDX-Net)
+- **Модель:** HT-Demucs FT (Hybrid Transformer Demucs)
 - **Вход:** Стерео аудио (MP3, WAV, OGG, FLAC, M4A, AAC, WebM)
 - **Выход:** 2 WAV файла (vocals, instrumental)
-- **STFT:** n_fft=768-1024, hop_length=384-512, hann window, center=True
-- **Чанк:** 262144 samples (~6s @ 44.1kHz)
-- **Overlap:** 50% overlap-add для плавности
+- **Формат входа:** (1, 2, 343980) - стерео аудио напрямую
+- **Формат выхода:** (1, 4, 2, 343980) - 4 дорожки (drums, bass, other, vocals)
+- **Чанк:** 343980 samples (7.8s @ 44.1kHz)
+- **Overlap:** 25% overlap-add для плавности
 
 ## 🔄 Как это работает
 
 1. **Загрузка аудио** — файл декодируется через Web Audio API
 2. **Загрузка модели** — ONNX модель скачивается с HuggingFace и кэшируется
-3. **Разбиение на чанки** — аудио разбивается на ~6-секундные сегменты с 50% перекрытием
-4. **STFT** — каждый чанк конвертируется в magnitude spectrogram
-5. **Инференс** — spectrogram подаётся в модель, которая возвращает маску вокала
-6. **Применение маски** — маска применяется к stereo STFT
-7. **iSTFT** — маскированные спектрограммы конвертируются обратно в аудио
-8. **Overlap-add** — чанки собираются обратно с учётом перекрытий
-9. **Instrumental** — вычисляется как original - vocals
-10. **Экспорт** — результаты кодируются в WAV для воспроизведения/скачивания
+3. **Разбиение на чанки** — аудио разбивается на 7.8-секундные сегменты с 25% перекрытием
+4. **Инференс** — каждый чанк подаётся в модель напрямую (без STFT!)
+5. **Извлечение stems** — модель возвращает 4 дорожки: drums, bass, other, vocals
+6. **Объединение** — Vocals = vocals stem, Instrumental = drums + bass + other
+7. **Overlap-add** — чанки собираются обратно с учётом перекрытий
+8. **Нормализация** — сигнал нормализуется до 0.95 peak
+9. **Экспорт** — результаты кодируются в WAV для воспроизведения/скачивания
 
 ## ⚡ Производительность
 
-- **WebGPU:** ~0.3-0.7x realtime (зависит от GPU)
-- **WASM:** ~1-3x realtime (зависит от CPU)
-- **Первая загрузка:** 28-64 MB (далее из кэша)
+- **WebGPU:** ~0.5x realtime (зависит от GPU)
+- **WASM:** ~2-3x realtime (зависит от CPU)
+- **Первая загрузка:** 316 MB (далее из кэша)
+- **3-минутная песня:** ~88s на M4 Pro CPU
 
 ## 🐛 Известные ограничения
 
-- Первая загрузка модели занимает время (336 MB)
+- Первая загрузка модели занимает время (316 MB)
 - Разделение на слабых машинах может занять несколько минут
 - GitHub Pages лимит трафика: 100 GB/месяц
 - WebGPU может не работать на старых GPU или в некоторых браузерах
@@ -152,7 +152,7 @@ MIT
 
 ## 🙏 Благодарности
 
-- **Модели:** [Blane187/all_public_uvr_models](https://huggingface.co/Blane187/all_public_uvr_models)
-- **Архитектура:** [kuielab/MDX-Net](https://github.com/kuielab) (Music Demixing Challenge)
-- **UVR Project:** [Anjok07/ultimatevocalremovergui](https://github.com/Anjok07/ultimatevocalremovergui)
+- **Модель:** [StemSplitio/htdemucs-ft-onnx](https://huggingface.co/StemSplitio/htdemucs-ft-onnx)
+- **Архитектура:** [facebookresearch/demucs](https://github.com/facebookresearch/demucs) (Hybrid Transformer Demucs)
+- **ONNX экспорт:** [StemSplit](https://stemsplit.io/)
 - **ONNX Runtime:** [onnxruntime-web](https://github.com/microsoft/onnxruntime)

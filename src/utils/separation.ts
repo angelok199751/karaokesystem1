@@ -1,6 +1,6 @@
 /**
- * Audio separation using UVR-MDX-NET ONNX models
- * Correct format: [batch, 4, dim_f, dim_t] where 4 = stereo(2) × complex(2)
+ * Audio separation using HT-Demucs FT ONNX
+ * Simple audio-to-audio separation - no manual STFT needed!
  */
 import * as ort from 'onnxruntime-web';
 import { ModelConfig } from './modelManager';
@@ -19,195 +19,6 @@ export interface SeparationProgress {
   totalChunks?: number;
   elapsed?: number;
   eta?: number;
-}
-
-// ── DSP: Hann window, STFT, iSTFT ──────────────────────────────────────────
-
-function hannWindow(len: number): Float32Array {
-  const w = new Float32Array(len);
-  for (let i = 0; i < len; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / len));
-  return w;
-}
-
-/** Radix-2 Cooley-Tukey FFT (in-place) */
-function fftInPlace(re: Float32Array, im: Float32Array, N: number): void {
-  // Bit-reversal permutation
-  for (let i = 1, j = 0; i < N; i++) {
-    let bit = N >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
-    if (i < j) {
-      let tmp = re[i]; re[i] = re[j]; re[j] = tmp;
-      tmp = im[i]; im[i] = im[j]; im[j] = tmp;
-    }
-  }
-  // FFT butterflies
-  for (let len = 2; len <= N; len <<= 1) {
-    const half = len >> 1;
-    const angle = -2 * Math.PI / len;
-    const wRe = Math.cos(angle), wIm = Math.sin(angle);
-    for (let i = 0; i < N; i += len) {
-      let curRe = 1, curIm = 0;
-      for (let j = 0; j < half; j++) {
-        const a = i + j, b = i + j + half;
-        const tRe = curRe * re[b] - curIm * im[b];
-        const tIm = curRe * im[b] + curIm * re[b];
-        re[b] = re[a] - tRe; im[b] = im[a] - tIm;
-        re[a] += tRe; im[a] += tIm;
-        const newCurRe = curRe * wRe - curIm * wIm;
-        curIm = curRe * wIm + curIm * wRe;
-        curRe = newCurRe;
-      }
-    }
-  }
-}
-
-/**
- * STFT for MDX-Net format
- * Input: stereo audio [2, chunk_size]
- * Output: [1, 4, dim_f, dim_t] where 4 = stereo(2) × complex(2)
- */
-function stftMDX(
-  left: Float32Array,
-  right: Float32Array,
-  nFft: number,
-  hop: number,
-  dimF: number,
-  dimT: number
-): Float32Array {
-  const window = hannWindow(nFft);
-  const nBins = nFft / 2 + 1;
-  const numFrames = Math.pow(2, dimT); // 2^8 = 256
-  
-  // Output: [1, 4, dim_f, dim_t]
-  // Channels: [L_real, L_imag, R_real, R_imag]
-  const output = new Float32Array(4 * dimF * numFrames);
-  
-  // Process left channel
-  for (let t = 0; t < numFrames; t++) {
-    const frameRe = new Float32Array(nFft);
-    const frameIm = new Float32Array(nFft);
-    const off = t * hop;
-    
-    for (let i = 0; i < nFft && off + i < left.length; i++) {
-      frameRe[i] = left[off + i] * window[i];
-    }
-    
-    fftInPlace(frameRe, frameIm, nFft);
-    
-    // Store first dimF bins (truncate from nBins to dimF)
-    for (let f = 0; f < dimF && f < nBins; f++) {
-      // Channel 0: L_real
-      output[0 * dimF * numFrames + f * numFrames + t] = frameRe[f];
-      // Channel 1: L_imag
-      output[1 * dimF * numFrames + f * numFrames + t] = frameIm[f];
-    }
-  }
-  
-  // Process right channel
-  for (let t = 0; t < numFrames; t++) {
-    const frameRe = new Float32Array(nFft);
-    const frameIm = new Float32Array(nFft);
-    const off = t * hop;
-    
-    for (let i = 0; i < nFft && off + i < right.length; i++) {
-      frameRe[i] = right[off + i] * window[i];
-    }
-    
-    fftInPlace(frameRe, frameIm, nFft);
-    
-    for (let f = 0; f < dimF && f < nBins; f++) {
-      // Channel 2: R_real
-      output[2 * dimF * numFrames + f * numFrames + t] = frameRe[f];
-      // Channel 3: R_imag
-      output[3 * dimF * numFrames + f * numFrames + t] = frameIm[f];
-    }
-  }
-  
-  return output;
-}
-
-/**
- * iSTFT for MDX-Net format
- * Input: [1, 4, dim_f, dim_t] masked spectrogram
- * Output: stereo audio [2, length]
- */
-function istftMDX(
-  spec: Float32Array,
-  nFft: number,
-  hop: number,
-  dimF: number,
-  dimT: number,
-  outputLength: number
-): { left: Float32Array; right: Float32Array } {
-  const window = hannWindow(nFft);
-  const nBins = nFft / 2 + 1;
-  const numFrames = Math.pow(2, dimT); // 2^8 = 256
-  
-  const left = new Float32Array(outputLength);
-  const right = new Float32Array(outputLength);
-  const winSum = new Float32Array(outputLength);
-  
-  // Process left channel (channels 0, 1)
-  for (let t = 0; t < numFrames; t++) {
-    const frameRe = new Float32Array(nFft);
-    const frameIm = new Float32Array(nFft);
-    
-    // Copy dimF bins from model output
-    for (let f = 0; f < dimF && f < nBins; f++) {
-      frameRe[f] = spec[0 * dimF * numFrames + f * numFrames + t];
-      frameIm[f] = spec[1 * dimF * numFrames + f * numFrames + t];
-    }
-    
-    // Mirror for negative frequencies (Hermitian symmetry)
-    for (let f = 1; f < nBins && f < dimF; f++) {
-      frameRe[nFft - f] = frameRe[f];
-      frameIm[nFft - f] = -frameIm[f];
-    }
-    
-    // Inverse FFT
-    fftInPlace(frameRe, frameIm, nFft);
-    
-    // Apply window and overlap-add
-    const off = t * hop;
-    for (let i = 0; i < nFft && off + i < outputLength; i++) {
-      left[off + i] += frameRe[i] * window[i];
-      winSum[off + i] += window[i] * window[i];
-    }
-  }
-  
-  // Process right channel (channels 2, 3) - use same winSum
-  for (let t = 0; t < numFrames; t++) {
-    const frameRe = new Float32Array(nFft);
-    const frameIm = new Float32Array(nFft);
-    
-    for (let f = 0; f < dimF && f < nBins; f++) {
-      frameRe[f] = spec[2 * dimF * numFrames + f * numFrames + t];
-      frameIm[f] = spec[3 * dimF * numFrames + f * numFrames + t];
-    }
-    
-    for (let f = 1; f < nBins && f < dimF; f++) {
-      frameRe[nFft - f] = frameRe[f];
-      frameIm[nFft - f] = -frameIm[f];
-    }
-    
-    fftInPlace(frameRe, frameIm, nFft);
-    
-    const off = t * hop;
-    for (let i = 0; i < nFft && off + i < outputLength; i++) {
-      right[off + i] += frameRe[i] * window[i];
-    }
-  }
-  
-  // Normalize both channels with same window sum
-  for (let i = 0; i < outputLength; i++) {
-    if (winSum[i] > 1e-8) {
-      left[i] /= winSum[i];
-      right[i] /= winSum[i];
-    }
-  }
-  
-  return { left, right };
 }
 
 // ── Resample ────────────────────────────────────────────────────────────────
@@ -258,75 +69,72 @@ export async function separateAudio(
     : new Float32Array(right);
 
   const totalSamples = procLeft.length;
+  const chunkSize = modelConfig.chunkSamples; // 343980
   
-  // Calculate chunk positions with overlap
-  const chunkSize = modelConfig.chunkSamples;
-  const step = Math.floor((chunkSize - modelConfig.nFft) / modelConfig.overlap);
+  // Calculate chunk positions with 25% overlap
+  const overlap = 4; // 25% overlap
+  const step = Math.floor(chunkSize / overlap);
   const starts: number[] = [];
   for (let s = 0; s < totalSamples; s += step) {
     starts.push(s);
   }
 
   // Accumulators for overlap-add
-  const vocalsL = new Float32Array(totalSamples);
-  const vocalsR = new Float32Array(totalSamples);
+  // Output shape: (1, 4, 2, 343980) = [drums, bass, other, vocals]
+  const stemsAccum: Float32Array[] = [
+    new Float32Array(totalSamples * 2), // drums (stereo)
+    new Float32Array(totalSamples * 2), // bass (stereo)
+    new Float32Array(totalSamples * 2), // other (stereo)
+    new Float32Array(totalSamples * 2), // vocals (stereo)
+  ];
   const count = new Float32Array(totalSamples);
 
   const t0 = performance.now();
-  const trim = modelConfig.nFft / 2; // 3072
-  const genSize = chunkSize - 2 * trim; // 254976
 
   for (let ci = 0; ci < starts.length; ci++) {
     const start = starts[ci];
-    const end = Math.min(start + genSize, totalSamples);
+    const end = Math.min(start + chunkSize, totalSamples);
     const chunkLen = end - start;
 
-    // Calculate padding to align to genSize
-    const pad = genSize - chunkLen;
+    // Extract chunk and pad to chunkSize
+    const chunkL = new Float32Array(chunkSize);
+    const chunkR = new Float32Array(chunkSize);
+    chunkL.set(procLeft.subarray(start, end));
+    chunkR.set(procRight.subarray(start, end));
 
-    // Extract chunk with padding (like in Python code)
-    // [trim zeros] + [chunk] + [pad zeros] + [trim zeros]
-    const paddedLength = trim + chunkLen + pad + trim;
-    const paddedL = new Float32Array(paddedLength);
-    const paddedR = new Float32Array(paddedLength);
-    
-    paddedL.set(procLeft.subarray(start, end), trim);
-    paddedR.set(procRight.subarray(start, end), trim);
+    // Create input tensor: (1, 2, 343980) - interleaved stereo
+    const inputData = new Float32Array(2 * chunkSize);
+    for (let i = 0; i < chunkSize; i++) {
+      inputData[i] = chunkL[i];           // Left channel
+      inputData[chunkSize + i] = chunkR[i]; // Right channel
+    }
 
-    // STFT: [1, 4, dim_f, dim_t]
-    const spek = stftMDX(
-      paddedL,
-      paddedR,
-      modelConfig.nFft,
-      modelConfig.hopLength,
-      modelConfig.dimF,
-      modelConfig.dimT
-    );
-
-    // Run ONNX inference
-    const numFrames = Math.pow(2, modelConfig.dimT); // 2^8 = 256
-    const inputTensor = new ort.Tensor('float32', spek, [1, 4, modelConfig.dimF, numFrames]);
+    const inputTensor = new ort.Tensor('float32', inputData, [1, 2, chunkSize]);
     
     const feeds: Record<string, ort.Tensor> = {};
     feeds[modelConfig.inputName] = inputTensor;
     
+    // Run ONNX inference
     const results = await session.run(feeds);
-    const outputSpec = results[modelConfig.outputName].data as Float32Array;
-
-    // iSTFT: get vocals (with padding)
-    const vocals = istftMDX(
-      outputSpec,
-      modelConfig.nFft,
-      modelConfig.hopLength,
-      modelConfig.dimF,
-      modelConfig.dimT,
-      paddedLength
-    );
-
-    // Remove padding: skip trim at start, skip (pad + trim) at end
+    const outputData = results[modelConfig.outputName].data as Float32Array;
+    
+    // Output shape: (1, 4, 2, chunkSize)
+    // Extract each stem and accumulate
+    for (let stemIdx = 0; stemIdx < 4; stemIdx++) {
+      const stemOffset = stemIdx * 2 * chunkSize;
+      
+      for (let i = 0; i < chunkLen; i++) {
+        // Left channel
+        const leftVal = outputData[stemOffset + i];
+        stemsAccum[stemIdx][start + i] += leftVal;
+        
+        // Right channel
+        const rightVal = outputData[stemOffset + chunkSize + i];
+        stemsAccum[stemIdx][totalSamples + start + i] += rightVal;
+      }
+    }
+    
     for (let i = 0; i < chunkLen; i++) {
-      vocalsL[start + i] += vocals.left[trim + i];
-      vocalsR[start + i] += vocals.right[trim + i];
       count[start + i] += 1;
     }
 
@@ -349,25 +157,43 @@ export async function separateAudio(
     await new Promise(r => setTimeout(r, 0));
   }
 
+  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Averaging overlaps...' });
+
   // Average overlaps
-  for (let i = 0; i < totalSamples; i++) {
-    if (count[i] > 0) {
-      vocalsL[i] /= count[i];
-      vocalsR[i] /= count[i];
+  for (let stemIdx = 0; stemIdx < 4; stemIdx++) {
+    for (let i = 0; i < totalSamples * 2; i++) {
+      const sampleIdx = i % totalSamples;
+      if (count[sampleIdx] > 0) {
+        stemsAccum[stemIdx][i] /= count[sampleIdx];
+      }
     }
   }
 
-  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Normalizing audio...' });
+  onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Building output...' });
 
-  // Aggressive normalization and gain
-  function normalizeAndBoost(signal: Float32Array, targetPeak: number = 0.95): Float32Array {
+  // Extract vocals (stem 3) and instrumental (drums + bass + other)
+  const vocalsL = new Float32Array(totalSamples);
+  const vocalsR = new Float32Array(totalSamples);
+  const instrL = new Float32Array(totalSamples);
+  const instrR = new Float32Array(totalSamples);
+
+  for (let i = 0; i < totalSamples; i++) {
+    // Vocals = stem 3
+    vocalsL[i] = stemsAccum[3][i];
+    vocalsR[i] = stemsAccum[3][totalSamples + i];
+    
+    // Instrumental = drums (0) + bass (1) + other (2)
+    instrL[i] = stemsAccum[0][i] + stemsAccum[1][i] + stemsAccum[2][i];
+    instrR[i] = stemsAccum[0][totalSamples + i] + stemsAccum[1][totalSamples + i] + stemsAccum[2][totalSamples + i];
+  }
+
+  // Normalize
+  function normalize(signal: Float32Array, targetPeak: number = 0.95): Float32Array {
     let maxVal = 0;
     for (let i = 0; i < signal.length; i++) {
       maxVal = Math.max(maxVal, Math.abs(signal[i]));
     }
-    
     if (maxVal < 1e-8) return signal;
-    
     const gain = targetPeak / maxVal;
     const result = new Float32Array(signal.length);
     for (let i = 0; i < signal.length; i++) {
@@ -376,34 +202,24 @@ export async function separateAudio(
     return result;
   }
 
-  // Normalize vocals
-  const vocalsLNorm = normalizeAndBoost(vocalsL);
-  const vocalsRNorm = normalizeAndBoost(vocalsR);
+  const vocalsLNorm = normalize(vocalsL);
+  const vocalsRNorm = normalize(vocalsR);
+  const instrLNorm = normalize(instrL);
+  const instrRNorm = normalize(instrR);
 
-  // Build instrumental = original - vocals
-  const instrL = new Float32Array(totalSamples);
-  const instrR = new Float32Array(totalSamples);
-  for (let i = 0; i < totalSamples; i++) {
-    instrL[i] = procLeft[i] - vocalsLNorm[i];
-    instrR[i] = procRight[i] - vocalsRNorm[i];
-  }
-  
-  // Normalize instrumental
-  const instrLFinal = normalizeAndBoost(instrL);
-  const instrRFinal = normalizeAndBoost(instrR);
-  
-  onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Resampling and encoding...' });
-  
+  onProgress?.({ stage: 'reconstructing', progress: 98, message: 'Resampling and encoding...' });
+
   // Resample back to original sample rate if needed
   let finalVocalsL: Float32Array = vocalsLNorm;
   let finalVocalsR: Float32Array = vocalsRNorm;
-  let finalInstrL: Float32Array = instrLFinal;
-  let finalInstrR: Float32Array = instrRFinal;
+  let finalInstrL: Float32Array = instrLNorm;
+  let finalInstrR: Float32Array = instrRNorm;
+
   if (modelConfig.sampleRate !== originalSampleRate) {
-    finalVocalsL = resample(vocalsL, modelConfig.sampleRate, originalSampleRate);
-    finalVocalsR = resample(vocalsR, modelConfig.sampleRate, originalSampleRate);
-    finalInstrL = resample(instrL, modelConfig.sampleRate, originalSampleRate);
-    finalInstrR = resample(instrR, modelConfig.sampleRate, originalSampleRate);
+    finalVocalsL = resample(vocalsLNorm, modelConfig.sampleRate, originalSampleRate);
+    finalVocalsR = resample(vocalsRNorm, modelConfig.sampleRate, originalSampleRate);
+    finalInstrL = resample(instrLNorm, modelConfig.sampleRate, originalSampleRate);
+    finalInstrR = resample(instrRNorm, modelConfig.sampleRate, originalSampleRate);
   }
 
   // Trim to original length
