@@ -122,6 +122,86 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
     setSelectedNoteIndex(null);
   };
 
+  // Добавление новой ноты
+  const addNote = (time: number, note: number) => {
+    const duration = 0.2; // Дефолтная длительность 200ms
+    const newNote: KaraokeNote = {
+      start: time,
+      end: time + duration,
+      note: note
+    };
+
+    // Добавляем в первую фразу или создаём новую
+    if (karaokeJSON.phrases.length === 0) {
+      const newPhrase = {
+        notes: [newNote],
+        start: time,
+        end: time + duration
+      };
+      onUpdate({ ...karaokeJSON, phrases: [newPhrase] });
+    } else {
+      // Находим подходящую фразу (ближайшую по времени)
+      let targetPhraseIndex = 0;
+      let minDistance = Infinity;
+
+      karaokeJSON.phrases.forEach((phrase, index) => {
+        const distance = Math.abs(phrase.start - time);
+        if (distance < minDistance) {
+          minDistance = distance;
+          targetPhraseIndex = index;
+        }
+      });
+
+      const newPhrases = karaokeJSON.phrases.map((phrase, index) => {
+        if (index === targetPhraseIndex) {
+          const newNotes = [...phrase.notes, newNote].sort((a, b) => a.start - b.start);
+          return {
+            ...phrase,
+            notes: newNotes,
+            start: Math.min(phrase.start, time),
+            end: Math.max(phrase.end, time + duration)
+          };
+        }
+        return phrase;
+      });
+
+      onUpdate({ ...karaokeJSON, phrases: newPhrases });
+    }
+  };
+
+  // Перетаскивание ноты
+  const handleNoteDrag = (index: number, newStart: number, newNote: number) => {
+    const note = allNotes[index % 1000];
+    const duration = note.end - note.start;
+    
+    const newPhrases = karaokeJSON.phrases.map((phrase, phraseIndex) => {
+      const newNotes = phrase.notes.map((n, noteIndex) => {
+        const globalIndex = phraseIndex * 1000 + noteIndex;
+        if (globalIndex === index) {
+          return {
+            start: newStart,
+            end: newStart + duration,
+            note: newNote
+          };
+        }
+        return n;
+      });
+      
+      // Обновляем границы фразы
+      const phraseStart = newNotes.length > 0 ? Math.min(...newNotes.map(n => n.start)) : phrase.start;
+      const phraseEnd = newNotes.length > 0 ? Math.max(...newNotes.map(n => n.end)) : phrase.end;
+      
+      return {
+        ...phrase,
+        notes: newNotes,
+        start: phraseStart,
+        end: phraseEnd
+      };
+    });
+
+    onUpdate({ ...karaokeJSON, phrases: newPhrases });
+  };
+
   // Получение глобального индекса ноты
   const getGlobalIndex = (phraseIndex: number, noteIndex: number): number => {
     return phraseIndex * 1000 + noteIndex;
@@ -186,6 +266,8 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
           notes={allNotes}
           selectedNoteIndex={selectedNoteIndex}
           onNoteClick={setSelectedNoteIndex}
+          onNoteDrag={handleNoteDrag}
+          onDoubleClick={addNote}
           currentTime={currentTime}
           onTimeChange={setCurrentTime}
         />

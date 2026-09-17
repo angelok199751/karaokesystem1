@@ -5,6 +5,8 @@ interface PianoRollProps {
   notes: KaraokeNote[];
   selectedNoteIndex: number | null;
   onNoteClick: (index: number) => void;
+  onNoteDrag?: (index: number, newStart: number, newNote: number) => void;
+  onDoubleClick?: (time: number, note: number) => void;
   currentTime?: number;
   onTimeChange?: (time: number) => void;
 }
@@ -13,6 +15,8 @@ export function PianoRoll({
   notes, 
   selectedNoteIndex, 
   onNoteClick,
+  onNoteDrag,
+  onDoubleClick,
   currentTime = 0,
   onTimeChange 
 }: PianoRollProps) {
@@ -22,6 +26,8 @@ export function PianoRoll({
   const [scrollTop, setScrollTop] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [draggingNoteIndex, setDraggingNoteIndex] = useState<number | null>(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
   // Настройки отображения
   const PIXELS_PER_SECOND = 100;
@@ -152,37 +158,88 @@ export function PianoRoll({
     }
   };
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button === 1 || e.button === 2) { // Средняя или правая кнопка
-      setIsDragging(true);
-      setDragStart({ x: e.clientX, y: e.clientY });
-      e.preventDefault();
+  const handleCanvasDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!onDoubleClick) return;
+    
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left + scrollLeft);
+    const y = (e.clientY - rect.top + scrollTop);
+
+    const time = x / PIXELS_PER_SECOND;
+    const note = MAX_NOTE - Math.floor(y / PIXELS_PER_NOTE);
+
+    // Проверяем, что клик не по существующей ноте
+    for (let i = 0; i < notes.length; i++) {
+      const noteObj = notes[i];
+      const noteX = noteObj.start * PIXELS_PER_SECOND;
+      const noteY = (MAX_NOTE - noteObj.note) * PIXELS_PER_NOTE;
+      const noteWidth = (noteObj.end - noteObj.start) * PIXELS_PER_SECOND;
+      const noteHeight = PIXELS_PER_NOTE;
+
+      if (x >= noteX && x <= noteX + noteWidth &&
+          y >= noteY && y <= noteY + noteHeight) {
+        return; // Клик по существующей ноте, не создаём новую
+      }
+    }
+
+    onDoubleClick(time, note);
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !onNoteDrag) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left + scrollLeft);
+    const y = (e.clientY - rect.top + scrollTop);
+
+    // Проверяем, кликнули ли по ноте
+    for (let i = 0; i < notes.length; i++) {
+      const note = notes[i];
+      const noteX = note.start * PIXELS_PER_SECOND;
+      const noteY = (MAX_NOTE - note.note) * PIXELS_PER_NOTE;
+      const noteWidth = (note.end - note.start) * PIXELS_PER_SECOND;
+      const noteHeight = PIXELS_PER_NOTE;
+
+      if (x >= noteX && x <= noteX + noteWidth &&
+          y >= noteY && y <= noteY + noteHeight) {
+        setDraggingNoteIndex(i);
+        setDragOffset({ x: x - noteX, y: y - noteY });
+        setIsDragging(true);
+        e.preventDefault();
+        return;
+      }
     }
   };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDragging) return;
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDragging || draggingNoteIndex === null || !onNoteDrag) return;
 
-    const dx = e.clientX - dragStart.x;
-    const dy = e.clientY - dragStart.y;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    setScrollLeft(prev => Math.max(0, prev - dx));
-    setScrollTop(prev => Math.max(0, prev - dy));
-    setDragStart({ x: e.clientX, y: e.clientY });
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left + scrollLeft);
+    const y = (e.clientY - rect.top + scrollTop);
+
+    const newStart = (x - dragOffset.x) / PIXELS_PER_SECOND;
+    const newNote = MAX_NOTE - Math.floor((y - dragOffset.y) / PIXELS_PER_NOTE);
+
+    onNoteDrag(draggingNoteIndex, Math.max(0, newStart), Math.max(0, Math.min(127, newNote)));
   };
 
   const handleMouseUp = () => {
     setIsDragging(false);
+    setDraggingNoteIndex(null);
   };
 
   return (
     <div 
       ref={containerRef}
       className="relative w-full h-96 bg-gray-900 rounded-lg overflow-hidden border border-gray-700"
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
       onContextMenu={(e) => e.preventDefault()}
     >
       <div 
@@ -201,13 +258,18 @@ export function PianoRoll({
         <canvas
           ref={canvasRef}
           onClick={handleCanvasClick}
+          onDoubleClick={handleCanvasDoubleClick}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
           className="cursor-pointer"
         />
       </div>
       
       {/* Легенда */}
       <div className="absolute bottom-2 right-2 bg-black/70 px-3 py-1 rounded text-xs text-gray-300">
-        Клик: выбрать ноту | ПКМ+перетаскивание: прокрутка
+        Клик: выбрать | Перетаскивание: переместить | Двойной клик: добавить ноту
       </div>
     </div>
   );
