@@ -119,3 +119,12 @@ export {
   downloadAutoLyrics 
 } from './autoLyricsGenerator';
 export type { AutoLyricsOptions } from './autoLyricsGenerator';
+
+// Re-export vocal filter
+export { 
+  applyVocalFilter, 
+  frequencyToMidi, 
+  midiToFrequency,
+  DEFAULT_VOCAL_FILTER_OPTIONS
+} from './vocalFilter';
+export type { VocalFilterOptions } from './vocalFilter';

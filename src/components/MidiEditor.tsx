@@ -5,7 +5,9 @@ import { KaraokeNote, KaraokeJSON } from '../utils/transcription/karaokeJSON';
 import { MidiCleanerPanel } from './MidiCleanerPanel';
 import { LyricsImporter } from './LyricsImporter';
 import { AutoLyricsGenerator } from './AutoLyricsGenerator';
+import { VocalFilterPanel } from './VocalFilterPanel';
 import { cleanMidi, CleanerOptions } from '../utils/transcription/midiCleaner';
+import { applyVocalFilter, VocalFilterOptions, DEFAULT_VOCAL_FILTER_OPTIONS } from '../utils/transcription/vocalFilter';
 import { alignNotesToLyrics, downloadAlignedKaraoke, LyricsFile, AlignedKaraokeFile } from '../utils/transcription/lyricsAligner';
 
 interface MidiEditorProps {
@@ -20,6 +22,7 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
   const [volume, setVolume] = useState(-10);
   const [lyrics, setLyrics] = useState<LyricsFile | null>(null);
   const [alignedData, setAlignedData] = useState<AlignedKaraokeFile | null>(null);
+  const [vocalFilterOptions, setVocalFilterOptions] = useState<VocalFilterOptions>(DEFAULT_VOCAL_FILTER_OPTIONS);
   const synthRef = useRef<Tone.PolySynth | null>(null);
   const animationRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
@@ -220,6 +223,13 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
     onUpdate(cleaned);
   };
 
+  // Обработка вокального фильтра
+  const handleVocalFilter = (options: VocalFilterOptions) => {
+    setVocalFilterOptions(options);
+    const filtered = applyVocalFilter(karaokeJSON, options);
+    onUpdate(filtered);
+  };
+
   // Обработка импорта текста
   const handleLyricsImport = (importedLyrics: LyricsFile) => {
     setLyrics(importedLyrics);
@@ -367,6 +377,12 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
 
       {/* MIDI Cleaner */}
       <MidiCleanerPanel onClean={handleClean} />
+
+      {/* Vocal Filter */}
+      <VocalFilterPanel 
+        options={vocalFilterOptions}
+        onChange={handleVocalFilter}
+      />
 
       {/* Auto Lyrics Generator */}
       <AutoLyricsGenerator 
