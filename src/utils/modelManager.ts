@@ -16,6 +16,8 @@ export interface ModelConfig {
   nFft: number;
   hopLength: number;
   winLength: number;
+  dimF: number;
+  dimT: number;
   chunkSamples: number;
   overlap: number;
   // Model I/O
@@ -35,10 +37,12 @@ export const MODELS: ModelConfig[] = [
     size: '~28 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 768,
-    hopLength: 384,
-    winLength: 768,
-    chunkSamples: 262144, // ~6s @ 44.1kHz
+    nFft: 6144,
+    hopLength: 1024,
+    winLength: 6144,
+    dimF: 2048,
+    dimT: 8, // 2^8 = 256 frames
+    chunkSamples: 261120, // hop * (dim_t - 1) = 1024 * 255
     overlap: 2,
     inputName: 'input',
     outputName: 'output',
@@ -51,10 +55,12 @@ export const MODELS: ModelConfig[] = [
     size: '~64 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
-    nFft: 1024,
-    hopLength: 512,
-    winLength: 1024,
-    chunkSamples: 262144,
+    nFft: 6144,
+    hopLength: 1024,
+    winLength: 6144,
+    dimF: 2048,
+    dimT: 8,
+    chunkSamples: 261120,
     overlap: 2,
     inputName: 'input',
     outputName: 'output',

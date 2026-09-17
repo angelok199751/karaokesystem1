@@ -1,6 +1,6 @@
 /**
  * Audio separation using UVR-MDX-NET ONNX models
- * Lightweight vocal separation (28-64 MB)
+ * Correct format: [batch, 4, dim_f, dim_t] where 4 = stereo(2) × complex(2)
  */
 import * as ort from 'onnxruntime-web';
 import { ModelConfig } from './modelManager';
@@ -62,187 +62,150 @@ function fftInPlace(re: Float32Array, im: Float32Array, N: number): void {
   }
 }
 
-/** Real FFT with center padding */
-function stftCenter(signal: Float32Array, nFft: number, hop: number, win: Float32Array): { real: Float32Array[]; imag: Float32Array[]; numFrames: number } {
-  const nFreq = nFft / 2 + 1;
-  const padLength = nFft / 2;
+/**
+ * STFT for MDX-Net format
+ * Input: stereo audio [2, chunk_size]
+ * Output: [1, 4, dim_f, dim_t] where 4 = stereo(2) × complex(2)
+ */
+function stftMDX(
+  left: Float32Array,
+  right: Float32Array,
+  nFft: number,
+  hop: number,
+  dimF: number,
+  dimT: number
+): Float32Array {
+  const window = hannWindow(nFft);
+  const nBins = nFft / 2 + 1;
+  const numFrames = dimT; // 256
   
-  // Pad signal with reflection (center=True)
-  const padded = new Float32Array(signal.length + 2 * padLength);
-  for (let i = 0; i < padLength; i++) {
-    padded[padLength - 1 - i] = signal[i];
-    padded[padLength + signal.length + i] = signal[signal.length - 1 - i];
-  }
-  padded.set(signal, padLength);
+  // Output: [1, 4, dim_f, dim_t]
+  // Channels: [L_real, L_imag, R_real, R_imag]
+  const output = new Float32Array(4 * dimF * numFrames);
   
-  const numFrames = Math.floor((padded.length - nFft) / hop) + 1;
-  const real: Float32Array[] = [];
-  const imag: Float32Array[] = [];
-  
+  // Process left channel
   for (let t = 0; t < numFrames; t++) {
     const frameRe = new Float32Array(nFft);
     const frameIm = new Float32Array(nFft);
     const off = t * hop;
     
-    for (let i = 0; i < nFft; i++) {
-      frameRe[i] = padded[off + i] * win[i];
+    for (let i = 0; i < nFft && off + i < left.length; i++) {
+      frameRe[i] = left[off + i] * window[i];
     }
     
     fftInPlace(frameRe, frameIm, nFft);
     
-    const posRe = new Float32Array(nFreq);
-    const posIm = new Float32Array(nFreq);
-    for (let f = 0; f < nFreq; f++) {
-      posRe[f] = frameRe[f];
-      posIm[f] = frameIm[f];
+    // Store first dimF bins (truncate from nBins to dimF)
+    for (let f = 0; f < dimF && f < nBins; f++) {
+      // Channel 0: L_real
+      output[0 * dimF * numFrames + f * numFrames + t] = frameRe[f];
+      // Channel 1: L_imag
+      output[1 * dimF * numFrames + f * numFrames + t] = frameIm[f];
     }
-    
-    real.push(posRe);
-    imag.push(posIm);
   }
   
-  return { real, imag, numFrames };
+  // Process right channel
+  for (let t = 0; t < numFrames; t++) {
+    const frameRe = new Float32Array(nFft);
+    const frameIm = new Float32Array(nFft);
+    const off = t * hop;
+    
+    for (let i = 0; i < nFft && off + i < right.length; i++) {
+      frameRe[i] = right[off + i] * window[i];
+    }
+    
+    fftInPlace(frameRe, frameIm, nFft);
+    
+    for (let f = 0; f < dimF && f < nBins; f++) {
+      // Channel 2: R_real
+      output[2 * dimF * numFrames + f * numFrames + t] = frameRe[f];
+      // Channel 3: R_imag
+      output[3 * dimF * numFrames + f * numFrames + t] = frameIm[f];
+    }
+  }
+  
+  return output;
 }
 
-/** Inverse STFT with center padding removal */
-function istftCenter(real: Float32Array[], imag: Float32Array[], nFft: number, hop: number, win: Float32Array, originalLength: number): Float32Array {
-  const numFrames = real.length;
-  const padLength = nFft / 2;
-  const paddedLength = originalLength + 2 * padLength;
+/**
+ * iSTFT for MDX-Net format
+ * Input: [1, 4, dim_f, dim_t] masked spectrogram
+ * Output: stereo audio [2, length]
+ */
+function istftMDX(
+  spec: Float32Array,
+  nFft: number,
+  hop: number,
+  dimF: number,
+  dimT: number,
+  outputLength: number
+): { left: Float32Array; right: Float32Array } {
+  const window = hannWindow(nFft);
+  const nBins = nFft / 2 + 1;
+  const numFrames = dimT;
   
-  const output = new Float32Array(paddedLength);
-  const winSum = new Float32Array(paddedLength);
+  const left = new Float32Array(outputLength);
+  const right = new Float32Array(outputLength);
+  const winSum = new Float32Array(outputLength);
   
+  // Process left channel (channels 0, 1)
   for (let t = 0; t < numFrames; t++) {
     const frameRe = new Float32Array(nFft);
     const frameIm = new Float32Array(nFft);
-    const nFreq = real[t].length;
     
-    for (let f = 0; f < nFreq; f++) {
-      frameRe[f] = real[t][f];
-      frameIm[f] = imag[t][f];
+    // Copy dimF bins
+    for (let f = 0; f < dimF && f < nBins; f++) {
+      frameRe[f] = spec[0 * dimF * numFrames + f * numFrames + t];
+      frameIm[f] = spec[1 * dimF * numFrames + f * numFrames + t];
     }
-    for (let f = 1; f < nFreq; f++) {
-      frameRe[nFft - f] = real[t][f];
-      frameIm[nFft - f] = -imag[t][f];
+    
+    // Mirror for negative frequencies
+    for (let f = 1; f < nBins; f++) {
+      if (f >= dimF) break;
+      frameRe[nFft - f] = frameRe[f];
+      frameIm[nFft - f] = -frameIm[f];
     }
     
     fftInPlace(frameRe, frameIm, nFft);
     
     const off = t * hop;
-    for (let i = 0; i < nFft && off + i < paddedLength; i++) {
-      output[off + i] += frameRe[i] * win[i];
-      winSum[off + i] += win[i] * win[i];
+    for (let i = 0; i < nFft && off + i < outputLength; i++) {
+      left[off + i] += frameRe[i] * window[i];
+      winSum[off + i] += window[i] * window[i];
+    }
+  }
+  
+  // Process right channel (channels 2, 3)
+  const winSumR = new Float32Array(outputLength);
+  for (let t = 0; t < numFrames; t++) {
+    const frameRe = new Float32Array(nFft);
+    const frameIm = new Float32Array(nFft);
+    
+    for (let f = 0; f < dimF && f < nBins; f++) {
+      frameRe[f] = spec[2 * dimF * numFrames + f * numFrames + t];
+      frameIm[f] = spec[3 * dimF * numFrames + f * numFrames + t];
+    }
+    
+    for (let f = 1; f < nBins; f++) {
+      if (f >= dimF) break;
+      frameRe[nFft - f] = frameRe[f];
+      frameIm[nFft - f] = -frameIm[f];
+    }
+    
+    fftInPlace(frameRe, frameIm, nFft);
+    
+    const off = t * hop;
+    for (let i = 0; i < nFft && off + i < outputLength; i++) {
+      right[off + i] += frameRe[i] * window[i];
+      winSumR[off + i] += window[i] * window[i];
     }
   }
   
   // Normalize
-  for (let i = 0; i < paddedLength; i++) {
-    if (winSum[i] > 1e-8) {
-      output[i] /= winSum[i];
-    }
+  for (let i = 0; i < outputLength; i++) {
+    if (winSum[i] > 1e-8) left[i] /= winSum[i];
+    if (winSumR[i] > 1e-8) right[i] /= winSumR[i];
   }
-  
-  // Remove padding
-  return output.slice(padLength, padLength + originalLength);
-}
-
-// ── Prepare model input ────────────────────────────────────────────────────
-
-interface ChunkInput {
-  magnitude: Float32Array;  // [1, 1, n_freq, n_frames]
-  numFrames: number;
-  stftL: { real: Float32Array[]; imag: Float32Array[] };
-  stftR: { real: Float32Array[]; imag: Float32Array[] };
-}
-
-function prepareChunkInput(
-  left: Float32Array,
-  right: Float32Array,
-  win: Float32Array,
-  nFft: number,
-  hop: number
-): ChunkInput {
-  const nFreq = nFft / 2 + 1;
-  
-  // Mix to mono for magnitude computation
-  const mono = new Float32Array(left.length);
-  for (let i = 0; i < left.length; i++) {
-    mono[i] = (left[i] + right[i]) / 2;
-  }
-  
-  // STFT for mono
-  const stftMono = stftCenter(mono, nFft, hop, win);
-  
-  // Also compute STFT for stereo (for later application)
-  const stftL = stftCenter(left, nFft, hop, win);
-  const stftR = stftCenter(right, nFft, hop, win);
-  
-  const numFrames = stftMono.numFrames;
-  
-  // Compute magnitude [1, 1, n_freq, n_frames]
-  const magnitude = new Float32Array(nFreq * numFrames);
-  
-  for (let t = 0; t < numFrames; t++) {
-    for (let f = 0; f < nFreq; f++) {
-      const re = stftMono.real[t][f];
-      const im = stftMono.imag[t][f];
-      magnitude[f * numFrames + t] = Math.sqrt(re * re + im * im);
-    }
-  }
-  
-  return { magnitude, numFrames, stftL, stftR };
-}
-
-// ── Apply model output and iSTFT ───────────────────────────────────────────
-
-interface StemAudio {
-  left: Float32Array;
-  right: Float32Array;
-}
-
-function applyMaskAndReconstruct(
-  mask: Float32Array,
-  stftL: { real: Float32Array[]; imag: Float32Array[] },
-  stftR: { real: Float32Array[]; imag: Float32Array[] },
-  numFrames: number,
-  win: Float32Array,
-  nFft: number,
-  hop: number,
-  originalLength: number
-): StemAudio {
-  const nFreq = nFft / 2 + 1;
-  
-  // Apply mask to stereo STFT
-  const maskedRealL: Float32Array[] = [];
-  const maskedImagL: Float32Array[] = [];
-  const maskedRealR: Float32Array[] = [];
-  const maskedImagR: Float32Array[] = [];
-  
-  for (let t = 0; t < numFrames; t++) {
-    const mReL = new Float32Array(nFreq);
-    const mImL = new Float32Array(nFreq);
-    const mReR = new Float32Array(nFreq);
-    const mImR = new Float32Array(nFreq);
-    
-    for (let f = 0; f < nFreq; f++) {
-      const m = mask[f * numFrames + t];
-      
-      mReL[f] = stftL.real[t][f] * m;
-      mImL[f] = stftL.imag[t][f] * m;
-      mReR[f] = stftR.real[t][f] * m;
-      mImR[f] = stftR.imag[t][f] * m;
-    }
-    
-    maskedRealL.push(mReL);
-    maskedImagL.push(mImL);
-    maskedRealR.push(mReR);
-    maskedImagR.push(mImR);
-  }
-  
-  // iSTFT for both channels
-  const left = istftCenter(maskedRealL, maskedImagL, nFft, hop, win, originalLength);
-  const right = istftCenter(maskedRealR, maskedImagR, nFft, hop, win, originalLength);
   
   return { left, right };
 }
@@ -295,10 +258,10 @@ export async function separateAudio(
     : new Float32Array(right);
 
   const totalSamples = procLeft.length;
-  const win = hannWindow(modelConfig.winLength);
   
   // Calculate chunk positions with overlap
-  const step = Math.floor(modelConfig.chunkSamples / modelConfig.overlap);
+  const chunkSize = modelConfig.chunkSamples;
+  const step = Math.floor(chunkSize / modelConfig.overlap);
   const starts: number[] = [];
   for (let s = 0; s < totalSamples; s += step) {
     starts.push(s);
@@ -313,34 +276,48 @@ export async function separateAudio(
 
   for (let ci = 0; ci < starts.length; ci++) {
     const start = starts[ci];
-    const end = Math.min(start + modelConfig.chunkSamples, totalSamples);
+    const end = Math.min(start + chunkSize, totalSamples);
     const chunkLen = end - start;
 
-    // Extract & pad chunk
-    const cL = new Float32Array(modelConfig.chunkSamples);
-    const cR = new Float32Array(modelConfig.chunkSamples);
+    // Extract chunk
+    const cL = new Float32Array(chunkSize);
+    const cR = new Float32Array(chunkSize);
     cL.set(procLeft.subarray(start, end));
     cR.set(procRight.subarray(start, end));
 
-    // STFT & prepare input
-    const { magnitude, numFrames, stftL, stftR } = prepareChunkInput(
-      cL, cR, win, modelConfig.nFft, modelConfig.hopLength
+    // Pad to chunk_size if needed
+    const paddedL = new Float32Array(chunkSize);
+    const paddedR = new Float32Array(chunkSize);
+    paddedL.set(cL);
+    paddedR.set(cR);
+
+    // STFT: [1, 4, dim_f, dim_t]
+    const spek = stftMDX(
+      paddedL,
+      paddedR,
+      modelConfig.nFft,
+      modelConfig.hopLength,
+      modelConfig.dimF,
+      modelConfig.dimT
     );
 
     // Run ONNX inference
-    const nFreq = modelConfig.nFft / 2 + 1;
-    const inputTensor = new ort.Tensor('float32', magnitude, [1, 1, nFreq, numFrames]);
+    const inputTensor = new ort.Tensor('float32', spek, [1, 4, modelConfig.dimF, modelConfig.dimT]);
     
     const feeds: Record<string, ort.Tensor> = {};
     feeds[modelConfig.inputName] = inputTensor;
     
     const results = await session.run(feeds);
-    const mask = results[modelConfig.outputName].data as Float32Array;
+    const outputSpec = results[modelConfig.outputName].data as Float32Array;
 
-    // Apply mask and reconstruct vocals
-    const vocals = applyMaskAndReconstruct(
-      mask, stftL, stftR, numFrames, win,
-      modelConfig.nFft, modelConfig.hopLength, modelConfig.chunkSamples
+    // iSTFT: get vocals
+    const vocals = istftMDX(
+      outputSpec,
+      modelConfig.nFft,
+      modelConfig.hopLength,
+      modelConfig.dimF,
+      modelConfig.dimT,
+      chunkSize
     );
 
     // Accumulate with overlap
