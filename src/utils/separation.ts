@@ -261,7 +261,7 @@ export async function separateAudio(
   
   // Calculate chunk positions with overlap
   const chunkSize = modelConfig.chunkSamples;
-  const step = Math.floor(chunkSize / modelConfig.overlap);
+  const step = Math.floor((chunkSize - modelConfig.nFft) / modelConfig.overlap);
   const starts: number[] = [];
   for (let s = 0; s < totalSamples; s += step) {
     starts.push(s);
@@ -273,19 +273,23 @@ export async function separateAudio(
   const count = new Float32Array(totalSamples);
 
   const t0 = performance.now();
-  const trim = modelConfig.nFft / 2; // Padding size
+  const trim = modelConfig.nFft / 2; // 3072
+  const genSize = chunkSize - 2 * trim; // 254976
 
   for (let ci = 0; ci < starts.length; ci++) {
     const start = starts[ci];
-    const end = Math.min(start + chunkSize, totalSamples);
+    const end = Math.min(start + genSize, totalSamples);
     const chunkLen = end - start;
 
+    // Calculate padding to align to genSize
+    const pad = genSize - chunkLen;
+
     // Extract chunk with padding (like in Python code)
-    const paddedLength = trim + chunkLen + trim;
+    // [trim zeros] + [chunk] + [pad zeros] + [trim zeros]
+    const paddedLength = trim + chunkLen + pad + trim;
     const paddedL = new Float32Array(paddedLength);
     const paddedR = new Float32Array(paddedLength);
     
-    // Add padding: [trim zeros] + [chunk] + [trim zeros]
     paddedL.set(procLeft.subarray(start, end), trim);
     paddedR.set(procRight.subarray(start, end), trim);
 
@@ -319,7 +323,7 @@ export async function separateAudio(
       paddedLength
     );
 
-    // Remove padding and accumulate
+    // Remove padding: skip trim at start, skip (pad + trim) at end
     for (let i = 0; i < chunkLen; i++) {
       vocalsL[start + i] += vocals.left[trim + i];
       vocalsR[start + i] += vocals.right[trim + i];
