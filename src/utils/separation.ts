@@ -353,24 +353,48 @@ export async function separateAudio(
     }
   }
 
-  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Building instrumental...' });
+  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Normalizing audio...' });
+
+  // Aggressive normalization and gain
+  function normalizeAndBoost(signal: Float32Array, targetPeak: number = 0.95): Float32Array {
+    let maxVal = 0;
+    for (let i = 0; i < signal.length; i++) {
+      maxVal = Math.max(maxVal, Math.abs(signal[i]));
+    }
+    
+    if (maxVal < 1e-8) return signal;
+    
+    const gain = targetPeak / maxVal;
+    const result = new Float32Array(signal.length);
+    for (let i = 0; i < signal.length; i++) {
+      result[i] = signal[i] * gain;
+    }
+    return result;
+  }
+
+  // Normalize vocals
+  const vocalsLNorm = normalizeAndBoost(vocalsL);
+  const vocalsRNorm = normalizeAndBoost(vocalsR);
 
   // Build instrumental = original - vocals
   const instrL = new Float32Array(totalSamples);
   const instrR = new Float32Array(totalSamples);
   for (let i = 0; i < totalSamples; i++) {
-    instrL[i] = procLeft[i] - vocalsL[i];
-    instrR[i] = procRight[i] - vocalsR[i];
+    instrL[i] = procLeft[i] - vocalsLNorm[i];
+    instrR[i] = procRight[i] - vocalsRNorm[i];
   }
-
+  
+  // Normalize instrumental
+  const instrLFinal = normalizeAndBoost(instrL);
+  const instrRFinal = normalizeAndBoost(instrR);
+  
   onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Resampling and encoding...' });
-
+  
   // Resample back to original sample rate if needed
-  let finalVocalsL: Float32Array = vocalsL;
-  let finalVocalsR: Float32Array = vocalsR;
-  let finalInstrL: Float32Array = instrL;
-  let finalInstrR: Float32Array = instrR;
-
+  let finalVocalsL: Float32Array = vocalsLNorm;
+  let finalVocalsR: Float32Array = vocalsRNorm;
+  let finalInstrL: Float32Array = instrLFinal;
+  let finalInstrR: Float32Array = instrRFinal;
   if (modelConfig.sampleRate !== originalSampleRate) {
     finalVocalsL = resample(vocalsL, modelConfig.sampleRate, originalSampleRate);
     finalVocalsR = resample(vocalsR, modelConfig.sampleRate, originalSampleRate);
