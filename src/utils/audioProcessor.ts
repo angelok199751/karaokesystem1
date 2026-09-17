@@ -43,7 +43,6 @@ export function fft(re: Float32Array, im: Float32Array, inverse: boolean = false
   
   // Check if N is power of 2
   if ((N & (N - 1)) !== 0) {
-    // Fallback to DFT for non-power-of-2 sizes
     dft(re, im, inverse);
     return;
   }
@@ -133,7 +132,6 @@ export function computeSTFT(
 
     fft(frameRe, frameIm, false);
 
-    // Take only positive frequencies
     const posRe = new Float32Array(numFreqs);
     const posIm = new Float32Array(numFreqs);
     for (let i = 0; i < numFreqs; i++) {
@@ -167,7 +165,6 @@ export function computeISTFT(
     const frameIm = new Float32Array(nFft);
     const start = frame * hopLength;
 
-    // Reconstruct full spectrum (mirror negative frequencies)
     const numFreqs = real[frame].length;
     for (let i = 0; i < numFreqs; i++) {
       frameRe[i] = real[frame][i];
@@ -178,17 +175,14 @@ export function computeISTFT(
       frameIm[nFft - i] = -imag[frame][i];
     }
 
-    // Inverse FFT
     fft(frameRe, frameIm, true);
 
-    // Overlap-add with window
     for (let i = 0; i < winLength && (start + i) < outputLength; i++) {
       output[start + i] += frameRe[i] * window[i];
       windowSum[start + i] += window[i] * window[i];
     }
   }
 
-  // Normalize by window sum
   for (let i = 0; i < outputLength; i++) {
     if (windowSum[i] > 1e-8) {
       output[i] /= windowSum[i];
@@ -199,7 +193,7 @@ export function computeISTFT(
 }
 
 // Encode Float32Array to WAV ArrayBuffer
-export function encodeWAV(audioData: Float32Array<ArrayBufferLike>, sampleRate: number, numChannels: number = 1): ArrayBuffer {
+export function encodeWAV(audioData: Float32Array, sampleRate: number, numChannels: number = 1): ArrayBuffer {
   const buffer = new ArrayBuffer(44 + audioData.length * 2);
   const view = new DataView(buffer);
 
@@ -208,13 +202,13 @@ export function encodeWAV(audioData: Float32Array<ArrayBufferLike>, sampleRate: 
   view.setUint32(4, 36 + audioData.length * 2, true);
   writeString(view, 8, 'WAVE');
   writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true); // chunk size
-  view.setUint16(20, 1, true); // PCM format
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
   view.setUint16(22, numChannels, true);
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, sampleRate * numChannels * 2, true);
   view.setUint16(32, numChannels * 2, true);
-  view.setUint16(34, 16, true); // bits per sample
+  view.setUint16(34, 16, true);
   writeString(view, 36, 'data');
   view.setUint32(40, audioData.length * 2, true);
 
@@ -244,7 +238,6 @@ export function audioBufferToMono(audioBuffer: AudioBuffer): Float32Array {
   if (numChannels === 1) {
     mono.set(audioBuffer.getChannelData(0));
   } else {
-    // Mix down to mono
     for (let ch = 0; ch < numChannels; ch++) {
       const channelData = audioBuffer.getChannelData(ch);
       for (let i = 0; i < length; i++) {
@@ -254,46 +247,6 @@ export function audioBufferToMono(audioBuffer: AudioBuffer): Float32Array {
   }
 
   return mono;
-}
-
-// Convert mono to stereo (duplicate channels)
-export function monoToStereo(mono: Float32Array): Float32Array {
-  const stereo = new Float32Array(mono.length * 2);
-  for (let i = 0; i < mono.length; i++) {
-    stereo[i * 2] = mono[i];
-    stereo[i * 2 + 1] = mono[i];
-  }
-  return stereo;
-}
-
-// Apply soft mask to separate sources
-export function applyMask(
-  mixReal: Float32Array[],
-  mixImag: Float32Array[],
-  mask: Float32Array[],
-  power: number = 1
-): { real: Float32Array[]; imag: Float32Array[] } {
-  const numFrames = mixReal.length;
-  const numFreqs = mixReal[0].length;
-  
-  const maskedReal: Float32Array[] = [];
-  const maskedImag: Float32Array[] = [];
-
-  for (let frame = 0; frame < numFrames; frame++) {
-    const frameRe = new Float32Array(numFreqs);
-    const frameIm = new Float32Array(numFreqs);
-
-    for (let freq = 0; freq < numFreqs; freq++) {
-      const m = Math.pow(Math.abs(mask[frame][freq]), power);
-      frameRe[freq] = mixReal[frame][freq] * m;
-      frameIm[freq] = mixImag[frame][freq] * m;
-    }
-
-    maskedReal.push(frameRe);
-    maskedImag.push(frameIm);
-  }
-
-  return { real: maskedReal, imag: maskedImag };
 }
 
 // Compute magnitude spectrogram

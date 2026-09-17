@@ -70,10 +70,10 @@ export async function getCachedModel(modelId: string): Promise<ArrayBuffer | nul
   return null;
 }
 
-export async function cacheModel(modelId: string, data: ArrayBuffer): Promise<void> {
+export async function cacheModel(modelId: string, modelBuffer: ArrayBuffer): Promise<void> {
   try {
     const cache = await caches.open(CACHE_NAME);
-    const response = new Response(data, {
+    const response = new Response(modelBuffer, {
       headers: { 'Content-Type': 'application/octet-stream' },
     });
     await cache.put(modelId, response);
@@ -158,7 +158,7 @@ export async function createSession(
   providers.push('wasm');
 
   const session = await ort.InferenceSession.create(modelBuffer, {
-    executionProviders: providers as any,
+    executionProviders: providers as unknown as ort.InferenceSession.ExecutionProviderConfig[],
     graphOptimizationLevel: 'all',
     enableCpuMemArena: true,
     enableMemPattern: true,
@@ -169,7 +169,7 @@ export async function createSession(
 
 export async function checkWebGPUAvailability(): Promise<boolean> {
   try {
-    const nav = navigator as any;
+    const nav = navigator as Navigator & { gpu?: { requestAdapter(): Promise<unknown> } };
     if (!nav.gpu) return false;
     const adapter = await nav.gpu.requestAdapter();
     return adapter !== null;

@@ -29,7 +29,7 @@ export interface SeparationProgress {
  * Resample audio to target sample rate using linear interpolation
  */
 function resample(audioData: Float32Array, fromRate: number, toRate: number): Float32Array {
-  if (fromRate === toRate) return audioData;
+  if (fromRate === toRate) return new Float32Array(audioData);
   
   const ratio = fromRate / toRate;
   const newLength = Math.round(audioData.length / ratio);
@@ -235,12 +235,15 @@ export async function separateAudio(
     // Create AudioBuffer (mono)
     const ctx = new OfflineAudioContext(1, stemSignal.length, sampleRate);
     const buf = ctx.createBuffer(1, stemSignal.length, sampleRate);
+    // Copy data into a new Float32Array to avoid type issues
     const channelData = new Float32Array(stemSignal.length);
-    channelData.set(stemSignal);
+    for (let i = 0; i < stemSignal.length; i++) {
+      channelData[i] = stemSignal[i];
+    }
     buf.copyToChannel(channelData, 0);
     
     // Encode to WAV
-    const wavData = encodeWAV(stemSignal as Float32Array<ArrayBuffer>, sampleRate, 1);
+    const wavData = encodeWAV(channelData, sampleRate, 1);
     
     finalResults.push({
       stemName: modelConfig.stems[stemIdx],
