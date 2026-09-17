@@ -77,7 +77,7 @@ function stftMDX(
 ): Float32Array {
   const window = hannWindow(nFft);
   const nBins = nFft / 2 + 1;
-  const numFrames = dimT; // 256
+  const numFrames = Math.pow(2, dimT); // 2^8 = 256
   
   // Output: [1, 4, dim_f, dim_t]
   // Channels: [L_real, L_imag, R_real, R_imag]
@@ -142,7 +142,7 @@ function istftMDX(
 ): { left: Float32Array; right: Float32Array } {
   const window = hannWindow(nFft);
   const nBins = nFft / 2 + 1;
-  const numFrames = dimT;
+  const numFrames = Math.pow(2, dimT); // 2^8 = 256
   
   const left = new Float32Array(outputLength);
   const right = new Float32Array(outputLength);
@@ -302,7 +302,8 @@ export async function separateAudio(
     );
 
     // Run ONNX inference
-    const inputTensor = new ort.Tensor('float32', spek, [1, 4, modelConfig.dimF, modelConfig.dimT]);
+    const numFrames = Math.pow(2, modelConfig.dimT); // 2^8 = 256
+    const inputTensor = new ort.Tensor('float32', spek, [1, 4, modelConfig.dimF, numFrames]);
     
     const feeds: Record<string, ort.Tensor> = {};
     feeds[modelConfig.inputName] = inputTensor;
