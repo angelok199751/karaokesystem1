@@ -392,47 +392,88 @@ export async function separateAudio(
     }
   }
 
-  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Resampling and encoding...' });
+  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Combining stems...' });
+
+  // Combine stems: Vocals (stem 3) and Instrumental (all others combined)
+  // Model outputs: 0=bass, 1=drums, 2=other, 3=vocals, 4=guitar, 5=piano
+  const vocalsL = new Float32Array(totalSamples);
+  const vocalsR = new Float32Array(totalSamples);
+  const instrL = new Float32Array(totalSamples);
+  const instrR = new Float32Array(totalSamples);
+
+  for (let i = 0; i < totalSamples; i++) {
+    // Vocals = stem 3
+    vocalsL[i] = stemAccumL[3][i] / (count[i] || 1);
+    vocalsR[i] = stemAccumR[3][i] / (count[i] || 1);
+
+    // Instrumental = sum of all other stems (0,1,2,4,5)
+    let instrSumL = 0;
+    let instrSumR = 0;
+    for (let s = 0; s < numStems; s++) {
+      if (s !== 3) { // Skip vocals
+        instrSumL += stemAccumL[s][i];
+        instrSumR += stemAccumR[s][i];
+      }
+    }
+    instrL[i] = instrSumL / (count[i] || 1);
+    instrR[i] = instrSumR / (count[i] || 1);
+  }
+
+  onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Resampling and encoding...' });
 
   // Resample back to original sample rate if needed
-  const finalResults: SeparationResult[] = [];
-  
-  for (let s = 0; s < numStems; s++) {
-    let stemL = stemAccumL[s];
-    let stemR = stemAccumR[s];
+  let finalVocalsL: Float32Array = vocalsL;
+  let finalVocalsR: Float32Array = vocalsR;
+  let finalInstrL: Float32Array = instrL;
+  let finalInstrR: Float32Array = instrR;
 
-    if (modelConfig.sampleRate !== originalSampleRate) {
-      stemL = resample(stemL, modelConfig.sampleRate, originalSampleRate);
-      stemR = resample(stemR, modelConfig.sampleRate, originalSampleRate);
-    }
-
-    // Trim to original length
-    const origLen = audioBuffer.length;
-    if (stemL.length > origLen) {
-      stemL = stemL.slice(0, origLen);
-      stemR = stemR.slice(0, origLen);
-    }
-
-    // Create AudioBuffer
-    const ctx = new OfflineAudioContext(2, stemL.length, originalSampleRate);
-    const buf = ctx.createBuffer(2, stemL.length, originalSampleRate);
-    buf.copyToChannel(new Float32Array(stemL), 0);
-    buf.copyToChannel(new Float32Array(stemR), 1);
-
-    // Encode to WAV
-    const stereo = interleaveStereo(stemL, stemR);
-    const wav = encodeStereoWAV(stereo, originalSampleRate);
-
-    finalResults.push({
-      stemName: modelConfig.stems[s],
-      audioBuffer: buf,
-      wavData: wav,
-    });
+  if (modelConfig.sampleRate !== originalSampleRate) {
+    finalVocalsL = resample(vocalsL, modelConfig.sampleRate, originalSampleRate);
+    finalVocalsR = resample(vocalsR, modelConfig.sampleRate, originalSampleRate);
+    finalInstrL = resample(instrL, modelConfig.sampleRate, originalSampleRate);
+    finalInstrR = resample(instrR, modelConfig.sampleRate, originalSampleRate);
   }
+
+  // Trim to original length
+  const origLen = audioBuffer.length;
+  if (finalVocalsL.length > origLen) {
+    finalVocalsL = finalVocalsL.slice(0, origLen);
+    finalVocalsR = finalVocalsR.slice(0, origLen);
+    finalInstrL = finalInstrL.slice(0, origLen);
+    finalInstrR = finalInstrR.slice(0, origLen);
+  }
+
+  // Create AudioBuffers
+  const vocalsCtx = new OfflineAudioContext(2, finalVocalsL.length, originalSampleRate);
+  const vocalsBuf = vocalsCtx.createBuffer(2, finalVocalsL.length, originalSampleRate);
+  const vocalsLData = new Float32Array(finalVocalsL.length);
+  vocalsLData.set(finalVocalsL);
+  const vocalsRData = new Float32Array(finalVocalsR.length);
+  vocalsRData.set(finalVocalsR);
+  vocalsBuf.copyToChannel(vocalsLData, 0);
+  vocalsBuf.copyToChannel(vocalsRData, 1);
+
+  const instrCtx = new OfflineAudioContext(2, finalInstrL.length, originalSampleRate);
+  const instrBuf = instrCtx.createBuffer(2, finalInstrL.length, originalSampleRate);
+  const instrLData = new Float32Array(finalInstrL.length);
+  instrLData.set(finalInstrL);
+  const instrRData = new Float32Array(finalInstrR.length);
+  instrRData.set(finalInstrR);
+  instrBuf.copyToChannel(instrLData, 0);
+  instrBuf.copyToChannel(instrRData, 1);
+
+  // Encode to WAV
+  const vocalsStereo = interleaveStereo(finalVocalsL, finalVocalsR);
+  const instrStereo = interleaveStereo(finalInstrL, finalInstrR);
+  const vocalsWav = encodeStereoWAV(vocalsStereo, originalSampleRate);
+  const instrWav = encodeStereoWAV(instrStereo, originalSampleRate);
 
   onProgress?.({ stage: 'done', progress: 100, message: 'Done!' });
 
-  return finalResults;
+  return [
+    { stemName: 'Vocals', audioBuffer: vocalsBuf, wavData: vocalsWav },
+    { stemName: 'Instrumental', audioBuffer: instrBuf, wavData: instrWav },
+  ];
 }
 
 function interleaveStereo(left: Float32Array, right: Float32Array): Float32Array {

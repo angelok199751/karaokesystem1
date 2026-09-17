@@ -158,7 +158,7 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">Audio Separator</h1>
-              <p className="text-xs text-gray-400">BS-Roformer-SW — 6-stem separation in your browser</p>
+              <p className="text-xs text-gray-400">BS-Roformer-SW — Vocals & Instrumental separation</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -180,7 +180,7 @@ function App() {
         <div className="mb-8 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
           <p className="text-sm text-indigo-200">
             <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server. 
-            Models are cached locally after first download. Uses <strong>BS-Roformer-SW</strong> — state-of-the-art 6-stem separation.
+            Models are cached locally after first download. Uses <strong>BS-Roformer-SW</strong> — state-of-the-art vocal separation.
           </p>
         </div>
 
@@ -230,7 +230,7 @@ function App() {
               onClick={handleSeparate}
               className="w-full py-4 px-6 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-semibold text-lg transition-all shadow-lg shadow-violet-500/25 hover:shadow-violet-500/40 active:scale-[0.98]"
             >
-              🎛️ Separate into 6 Stems
+              🎛️ Separate Vocals & Instrumental
             </button>
           </div>
         )}
@@ -288,14 +288,10 @@ function App() {
 
             {/* Stems */}
             {results.map((result, idx) => {
-              const colors: Array<'pink' | 'blue' | 'amber' | 'emerald' | 'violet'> = ['pink', 'blue', 'amber', 'emerald', 'violet', 'pink'];
+              const colors: Array<'pink' | 'blue'> = ['pink', 'blue'];
               const icons: Record<string, string> = {
                 'Vocals': '🎤',
-                'Drums': '🥁',
-                'Bass': '🎸',
-                'Guitar': '🎸',
-                'Piano': '🎹',
-                'Other': '🎵',
+                'Instrumental': '🎸',
               };
               
               return (
@@ -364,7 +360,7 @@ function App() {
             </div>
             <div className="p-4 rounded-lg bg-white/5">
               <h4 className="font-medium text-gray-300 mb-1">🧠 Model</h4>
-              <p>BS-Roformer-SW — 6 stems: bass, drums, other, vocals, guitar, piano. MIT license.</p>
+              <p>BS-Roformer-SW — Vocals + Instrumental. MIT license.</p>
             </div>
           </div>
         </div>

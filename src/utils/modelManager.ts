@@ -32,10 +32,10 @@ export const MODELS: ModelConfig[] = [
   {
     id: 'bs-roformer-sw-fp16',
     name: 'BS-Roformer-SW FP16 (Recommended)',
-    description: '6-stem separation: bass, drums, other, vocals, guitar, piano. 336MB. Best quality/speed.',
+    description: 'Vocals + Instrumental separation. 336MB. Best quality/speed.',
     url: `${HF_BASE}/elicwhite/bs-roformer-sw-6stem-onnx/resolve/main/bs_roformer_sw_6stem_fp16.onnx`,
     size: '~336 MB',
-    stems: ['Bass', 'Drums', 'Other', 'Vocals', 'Guitar', 'Piano'],
+    stems: ['Vocals', 'Instrumental'], // Simplified output
     sampleRate: 44100,
     nFft: 2048,
     hopLength: 512,
@@ -52,7 +52,7 @@ export const MODELS: ModelConfig[] = [
     description: 'Same model, fp32 weights. 669MB. Use if fp16 fails.',
     url: `${HF_BASE}/elicwhite/bs-roformer-sw-6stem-onnx/resolve/main/bs_roformer_sw_6stem_fp32.onnx`,
     size: '~669 MB',
-    stems: ['Bass', 'Drums', 'Other', 'Vocals', 'Guitar', 'Piano'],
+    stems: ['Vocals', 'Instrumental'], // Simplified output
     sampleRate: 44100,
     nFft: 2048,
     hopLength: 512,
