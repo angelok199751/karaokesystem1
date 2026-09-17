@@ -1,13 +1,10 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import * as ort from 'onnxruntime-web';
-import { MODELS, ModelConfig, createSession, checkWebGPUAvailability } from './utils/modelManager';
 import { separateAudio, SeparationResult, SeparationProgress } from './utils/separation';
 import { AudioPlayer } from './components/AudioPlayer';
 import { FileUpload } from './components/FileUpload';
 import { ProgressBar } from './components/ProgressBar';
-import { ModelSelector } from './components/ModelSelector';
 
-type AppState = 'idle' | 'file-loaded' | 'loading-model' | 'processing' | 'done' | 'error';
+type AppState = 'idle' | 'file-loaded' | 'processing' | 'done' | 'error';
 
 interface AppProgress {
   modelProgress: number;
@@ -19,30 +16,16 @@ function App() {
   const [state, setState] = useState<AppState>('idle');
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
-  const [selectedModel, setSelectedModel] = useState<ModelConfig>(MODELS[0]);
   const [results, setResults] = useState<SeparationResult[]>([]);
   const [progress, setProgress] = useState<AppProgress>({
-    modelProgress: 0,
-    modelMessage: '',
+    modelProgress: 100,
+    modelMessage: 'No model needed! Using classical signal processing.',
     separationProgress: null,
   });
   const [errorMsg, setErrorMsg] = useState<string>('');
-  const [webgpuAvailable, setWebgpuAvailable] = useState<boolean>(false);
   const [originalUrl, setOriginalUrl] = useState<string>('');
-  const [activeProvider, setActiveProvider] = useState<string>('');
   
-  const sessionRef = useRef<ort.InferenceSession | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-
-  // Configure onnxruntime-web on mount
-  useEffect(() => {
-    checkWebGPUAvailability().then(setWebgpuAvailable);
-    
-    // Load WASM from CDN — version MUST match installed npm package (1.21.0)
-    ort.env.wasm.numThreads = 1;
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
-    ort.env.logLevel = 'warning';
-  }, []);
 
   const getAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
@@ -74,34 +57,19 @@ function App() {
   const handleSeparate = useCallback(async () => {
     if (!audioBuffer) return;
     
-    setState('loading-model');
+    setState('processing');
     setErrorMsg('');
     setResults([]);
-    setActiveProvider('');
     setProgress({
-      modelProgress: 0,
-      modelMessage: 'Starting download...',
+      modelProgress: 100,
+      modelMessage: 'Processing audio using classical signal processing...',
       separationProgress: null,
     });
 
     try {
-      // Create session (downloads model internally)
-      const { session, provider } = await createSession(selectedModel, webgpuAvailable);
-      sessionRef.current = session;
-      setActiveProvider(provider);
-
-      setState('processing');
-      setProgress(prev => ({
-        ...prev,
-        modelProgress: 100,
-        modelMessage: `Model loaded! Using ${provider.toUpperCase()}. Starting separation...`,
-      }));
-
-      // Separate audio
+      // Separate audio using classical methods (no model needed!)
       const separationResults = await separateAudio(
         audioBuffer,
-        selectedModel,
-        session,
         (sepProgress) => {
           setProgress(prev => ({
             ...prev,
@@ -117,7 +85,7 @@ function App() {
       setErrorMsg(`Separation failed: ${err instanceof Error ? err.message : String(err)}`);
       setState('error');
     }
-  }, [audioBuffer, selectedModel, webgpuAvailable]);
+  }, [audioBuffer]);
 
   const handleReset = useCallback(() => {
     setState('idle');
@@ -125,8 +93,11 @@ function App() {
     setAudioBuffer(null);
     setResults([]);
     setErrorMsg('');
-    setActiveProvider('');
-    setProgress({ modelProgress: 0, modelMessage: '', separationProgress: null });
+    setProgress({
+      modelProgress: 100,
+      modelMessage: 'No model needed! Using classical signal processing.',
+      separationProgress: null,
+    });
     if (originalUrl) {
       URL.revokeObjectURL(originalUrl);
       setOriginalUrl('');
@@ -158,18 +129,8 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">Audio Separator</h1>
-              <p className="text-xs text-gray-400">BS PolarFormer — Split vocals & instrumentals in your browser</p>
+              <p className="text-xs text-gray-400">Split vocals & instrumentals in your browser</p>
             </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs ${
-              webgpuAvailable 
-                ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
-                : 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
-            }`}>
-              <span className={`w-2 h-2 rounded-full ${webgpuAvailable ? 'bg-green-400' : 'bg-yellow-400'}`}></span>
-              {webgpuAvailable ? 'WebGPU' : 'WASM'}
-            </span>
           </div>
         </div>
       </header>
@@ -179,18 +140,10 @@ function App() {
         {/* Info banner */}
         <div className="mb-8 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
           <p className="text-sm text-indigo-200">
-            <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server. 
-            Models are cached locally after first download. Uses <strong>BS PolarFormer</strong> — state-of-the-art vocal separation model.
+            <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server.
+            Uses <strong>classical signal processing</strong> — no ML model needed, works instantly!
           </p>
         </div>
-
-        {/* Model selector */}
-        <ModelSelector
-          models={MODELS}
-          selected={selectedModel}
-          onChange={setSelectedModel}
-          disabled={state === 'loading-model' || state === 'processing'}
-        />
 
         {/* File upload */}
         {state === 'idle' && (
@@ -235,16 +188,16 @@ function App() {
           </div>
         )}
 
-        {/* Loading / Processing */}
-        {(state === 'loading-model' || state === 'processing') && (
+        {/* Processing */}
+        {state === 'processing' && (
           <div className="space-y-6">
             <ProgressBar
-              progress={state === 'loading-model' ? progress.modelProgress : 100}
-              message={state === 'loading-model' ? progress.modelMessage : `Model loaded! Using ${activeProvider.toUpperCase()}`}
+              progress={progress.modelProgress}
+              message={progress.modelMessage}
               variant="model"
             />
             
-            {state === 'processing' && progress.separationProgress && (
+            {progress.separationProgress && (
               <ProgressBar
                 progress={progress.separationProgress.progress}
                 message={progress.separationProgress.message}
@@ -256,10 +209,7 @@ function App() {
               <div className="flex items-center gap-3">
                 <div className="animate-spin w-5 h-5 border-2 border-violet-400 border-t-transparent rounded-full"></div>
                 <p className="text-sm text-gray-300">
-                  {state === 'loading-model' 
-                    ? 'Downloading model... First time may take a while. The model will be cached for future use.'
-                    : 'Processing audio through the neural network. This may take a few minutes depending on file length and hardware.'
-                  }
+                  Processing audio using Center Channel Extraction method...
                 </p>
               </div>
             </div>
@@ -341,16 +291,16 @@ function App() {
         <div className="mt-12 pt-8 border-t border-white/10">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-400">
             <div className="p-4 rounded-lg bg-white/5">
-              <h4 className="font-medium text-gray-300 mb-1">🌐 Browser Support</h4>
-              <p>Chrome 113+, Edge 113+, Safari 18+, Firefox 121+ (WebGPU). WASM works everywhere.</p>
+              <h4 className="font-medium text-gray-300 mb-1">⚡ Instant Processing</h4>
+              <p>No model download needed. Works instantly on any audio file.</p>
             </div>
             <div className="p-4 rounded-lg bg-white/5">
-              <h4 className="font-medium text-gray-300 mb-1">⚡ Performance</h4>
-              <p>WebGPU is 3-5x faster than WASM. First model download: {selectedModel.size}.</p>
+              <h4 className="font-medium text-gray-300 mb-1">🎯 How It Works</h4>
+              <p>Uses Center Channel Extraction - vocals are typically panned to center in stereo.</p>
             </div>
             <div className="p-4 rounded-lg bg-white/5">
-              <h4 className="font-medium text-gray-300 mb-1">🧠 Model</h4>
-              <p>BS PolarFormer — BSRoformer architecture with PoPE embeddings. SDR 11.0 on vocals.</p>
+              <h4 className="font-medium text-gray-300 mb-1">🎵 Best For</h4>
+              <p>Stereo audio with centered vocals. Works great for karaoke creation.</p>
             </div>
           </div>
         </div>
