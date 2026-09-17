@@ -6,7 +6,7 @@ import * as ort from 'onnxruntime-web';
 import { ModelConfig } from './modelManager';
 
 export interface SeparationResult {
-  name: string;
+  stemName: string;
   audioBuffer: AudioBuffer;
   wavData: ArrayBuffer;
 }
@@ -160,8 +160,8 @@ export async function separateAudio(
   onProgress?.({ stage: 'done', progress: 100, message: 'Done!' });
 
   return [
-    { name: 'Vocals', audioBuffer: vocalsBuf, wavData: vocalsWav },
-    { name: 'Instrumental', audioBuffer: instrBuf, wavData: instrWav },
+    { stemName: 'Vocals', audioBuffer: vocalsBuf, wavData: vocalsWav },
+    { stemName: 'Instrumental', audioBuffer: instrBuf, wavData: instrWav },
   ];
 }
 

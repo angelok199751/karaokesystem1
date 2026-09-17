@@ -1,7 +1,12 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import * as ort from 'onnxruntime-web';
+import { MODELS, ModelConfig, checkWebGPUAvailability } from './utils/modelManager';
+import { separateAudio, SeparationResult, SeparationProgress } from './utils/separation';
 import { transcribeAudio, downloadMidi, TranscriptionProgress } from './utils/transcription';
-import { MODELS, ModelConfig, checkWebGPUAvailability, downloadModel, createSession } from './utils/modelManager';
-import { separateAudio, SeparationProgress } from './utils/separation';
+import { AudioPlayer } from './components/AudioPlayer';
+import { FileUpload } from './components/FileUpload';
+import { ProgressBar } from './components/ProgressBar';
+import { ModelSelector } from './components/ModelSelector';
 
 type AppState = 'idle' | 'file-loaded' | 'loading-model' | 'processing' | 'done' | 'error';
 
@@ -12,24 +17,35 @@ interface AppProgress {
   transcriptionProgress: TranscriptionProgress | null;
 }
 
-export default function App() {
+function App() {
   const [state, setState] = useState<AppState>('idle');
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
   const [selectedModel, setSelectedModel] = useState<ModelConfig>(MODELS[0]);
-  const [results, setResults] = useState<{ name: string; audioBuffer: AudioBuffer; wavData: ArrayBuffer }[]>([]);
+  const [results, setResults] = useState<SeparationResult[]>([]);
   const [midiData, setMidiData] = useState<Uint8Array | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
-  const [webgpuAvailable, setWebgpuAvailable] = useState(false);
   const [progress, setProgress] = useState<AppProgress>({
     modelProgress: 0,
     modelMessage: '',
     separationProgress: null,
     transcriptionProgress: null,
   });
-
+  const [errorMsg, setErrorMsg] = useState<string>('');
+  const [webgpuAvailable, setWebgpuAvailable] = useState<boolean>(false);
+  const [originalUrl, setOriginalUrl] = useState<string>('');
+  const [activeProvider, setActiveProvider] = useState<string>('');
+  
+  const sessionRef = useRef<ort.InferenceSession | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    checkWebGPUAvailability().then(setWebgpuAvailable);
+    
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
+    ort.env.logLevel = 'warning';
+  }, []);
 
   const getAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
@@ -50,6 +66,9 @@ export default function App() {
       const arrayBuffer = await file.arrayBuffer();
       const buffer = await ctx.decodeAudioData(arrayBuffer);
       setAudioBuffer(buffer);
+      
+      const url = URL.createObjectURL(file);
+      setOriginalUrl(url);
     } catch (err) {
       setErrorMsg(`Failed to decode audio: ${err}`);
       setState('error');
@@ -63,6 +82,7 @@ export default function App() {
     setErrorMsg('');
     setResults([]);
     setMidiData(null);
+    setActiveProvider('');
     setProgress({
       modelProgress: 0,
       modelMessage: 'Starting download...',
@@ -71,10 +91,19 @@ export default function App() {
     });
 
     try {
-      const webgpu = await checkWebGPUAvailability();
-      setWebgpuAvailable(webgpu);
+      const { downloadModel, createSession } = await import('./utils/modelManager');
+      await downloadModel(selectedModel.url, (loaded, total) => {
+        const progress = total > 0 ? (loaded / total) * 100 : 0;
+        setProgress(prev => ({
+          ...prev,
+          modelProgress: progress,
+          modelMessage: `Downloading model... ${Math.round(progress)}%`,
+        }));
+      });
 
-      const { session, provider } = await createSession(selectedModel, webgpu);
+      const { session, provider } = await createSession(selectedModel, webgpuAvailable);
+      sessionRef.current = session;
+      setActiveProvider(provider);
 
       setState('processing');
       setProgress(prev => ({
@@ -102,10 +131,10 @@ export default function App() {
       setErrorMsg(`Separation failed: ${err instanceof Error ? err.message : String(err)}`);
       setState('error');
     }
-  }, [audioBuffer, selectedModel]);
+  }, [audioBuffer, selectedModel, webgpuAvailable]);
 
   const handleTranscribe = useCallback(async () => {
-    const vocalsResult = results.find(r => r.name === 'Vocals');
+    const vocalsResult = results.find(r => r.stemName === 'Vocals');
     if (!vocalsResult) {
       setErrorMsg('Vocals not found. Please separate audio first.');
       return;
@@ -143,57 +172,103 @@ export default function App() {
     setMidiData(null);
     setIsTranscribing(false);
     setErrorMsg('');
-    setProgress({
-      modelProgress: 0,
-      modelMessage: '',
-      separationProgress: null,
-      transcriptionProgress: null,
+    setActiveProvider('');
+    setProgress({ modelProgress: 0, modelMessage: '', separationProgress: null, transcriptionProgress: null });
+    if (originalUrl) {
+      URL.revokeObjectURL(originalUrl);
+      setOriginalUrl('');
+    }
+  }, [originalUrl]);
+
+  const resultUrls = useMemo(() => {
+    return results.map(result => {
+      const blob = new Blob([result.wavData], { type: 'audio/wav' });
+      return URL.createObjectURL(blob);
     });
-  }, []);
+  }, [results]);
+  
+  useEffect(() => {
+    return () => {
+      resultUrls.forEach(url => URL.revokeObjectURL(url));
+    };
+  }, [resultUrls]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-indigo-950 text-white">
-      <div className="max-w-4xl mx-auto px-4 py-8">
-        <h1 className="text-4xl font-bold mb-2 text-center">🎵 Audio Separator</h1>
-        <p className="text-center text-gray-400 mb-8">
-          Demucs HT — Browser-optimized vocal separation + MIDI transcription
-        </p>
+    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-indigo-950">
+      <header className="border-b border-white/10 backdrop-blur-sm bg-black/20">
+        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-xl">
+              🎵
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-white">Audio Separator</h1>
+              <p className="text-xs text-gray-400">Demucs HT + MIDI Transcription</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs ${
+              webgpuAvailable 
+                ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                : 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${webgpuAvailable ? 'bg-green-400' : 'bg-yellow-400'}`}></span>
+              {webgpuAvailable ? 'WebGPU' : 'WASM'}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-4xl mx-auto px-4 py-8">
+        <div className="mb-8 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
+          <p className="text-sm text-indigo-200">
+            <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server.
+            <br/><strong>🌐 Auto-mirrors:</strong> Automatically tries multiple download sources — VPN may not be needed!
+          </p>
+        </div>
+
+        <ModelSelector
+          models={MODELS}
+          selected={selectedModel}
+          onChange={setSelectedModel}
+          disabled={state === 'loading-model' || state === 'processing'}
+        />
 
         {state === 'idle' && (
-          <div className="bg-white/5 rounded-xl p-8 border border-white/10">
-            <h2 className="text-2xl font-semibold mb-4">Upload Audio File</h2>
-            <input
-              type="file"
-              accept="audio/*"
-              onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
-              className="w-full p-4 bg-white/10 rounded-lg border border-white/20 cursor-pointer hover:bg-white/15 transition"
-            />
-          </div>
+          <FileUpload onFileSelect={handleFileSelect} />
         )}
 
-        {state === 'file-loaded' && audioFile && (
-          <div className="bg-white/5 rounded-xl p-8 border border-white/10 space-y-4">
-            <h2 className="text-2xl font-semibold">File: {audioFile.name}</h2>
-            <p className="text-gray-400">Size: {(audioFile.size / 1024 / 1024).toFixed(2)} MB</p>
-            
-            <div>
-              <label className="block text-sm font-medium mb-2">Select Model:</label>
-              <select
-                value={selectedModel.id}
-                onChange={(e) => setSelectedModel(MODELS.find(m => m.id === e.target.value) || MODELS[0])}
-                className="w-full p-3 bg-white/10 rounded-lg border border-white/20"
-              >
-                {MODELS.map(model => (
-                  <option key={model.id} value={model.id} className="bg-gray-900">
-                    {model.name} ({model.size})
-                  </option>
-                ))}
-              </select>
+        {state === 'file-loaded' && audioFile && audioBuffer && (
+          <div className="space-y-6">
+            <div className="p-6 rounded-xl bg-white/5 border border-white/10">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-lg bg-violet-500/20 flex items-center justify-center text-2xl">
+                  🎶
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium text-white truncate">{audioFile.name}</h3>
+                  <p className="text-sm text-gray-400">
+                    {(audioFile.size / 1024 / 1024).toFixed(2)} MB • {audioBuffer.duration.toFixed(1)}s • {audioBuffer.sampleRate}Hz • {audioBuffer.numberOfChannels}ch
+                  </p>
+                </div>
+                <button
+                  onClick={handleReset}
+                  className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 text-sm transition-colors"
+                >
+                  Change file
+                </button>
+              </div>
+              
+              {originalUrl && (
+                <div className="mt-4">
+                  <AudioPlayer audioUrl={originalUrl} label="Original" color="violet" />
+                </div>
+              )}
             </div>
 
             <button
               onClick={handleSeparate}
-              className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 rounded-lg font-semibold transition"
+              className="w-full py-4 px-6 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-semibold text-lg transition-all shadow-lg shadow-violet-500/25 hover:shadow-violet-500/40 active:scale-[0.98]"
             >
               🎛️ Separate Vocals & Instrumental
             </button>
@@ -201,138 +276,172 @@ export default function App() {
         )}
 
         {(state === 'loading-model' || state === 'processing') && (
-          <div className="bg-white/5 rounded-xl p-8 border border-white/10 space-y-4">
-            <h2 className="text-2xl font-semibold">Processing...</h2>
+          <div className="space-y-6">
+            <ProgressBar
+              progress={state === 'loading-model' ? progress.modelProgress : 100}
+              message={state === 'loading-model' ? progress.modelMessage : `Model loaded! Using ${activeProvider.toUpperCase()}`}
+              variant="model"
+            />
             
-            <div>
-              <div className="flex justify-between mb-2">
-                <span>{progress.modelMessage}</span>
-                <span>{Math.round(progress.modelProgress)}%</span>
-              </div>
-              <div className="w-full bg-white/10 rounded-full h-2">
-                <div
-                  className="bg-indigo-600 h-2 rounded-full transition-all"
-                  style={{ width: `${progress.modelProgress}%` }}
-                />
+            {state === 'processing' && progress.separationProgress && (
+              <ProgressBar
+                progress={progress.separationProgress.progress}
+                message={progress.separationProgress.message}
+                variant="separation"
+              />
+            )}
+
+            <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+              <div className="flex items-center gap-3">
+                <div className="animate-spin w-5 h-5 border-2 border-violet-400 border-t-transparent rounded-full"></div>
+                <p className="text-sm text-gray-300">
+                  {state === 'loading-model' 
+                    ? 'Downloading model... First time may take a while (170MB). The model will be cached for future use.'
+                    : 'Processing audio through the neural network. This may take a few minutes depending on file length and hardware.'
+                  }
+                </p>
               </div>
             </div>
-
-            {progress.separationProgress && (
-              <div>
-                <div className="flex justify-between mb-2">
-                  <span>{progress.separationProgress.message}</span>
-                  <span>{Math.round(progress.separationProgress.progress)}%</span>
-                </div>
-                <div className="w-full bg-white/10 rounded-full h-2">
-                  <div
-                    className="bg-purple-600 h-2 rounded-full transition-all"
-                    style={{ width: `${progress.separationProgress.progress}%` }}
-                  />
-                </div>
-              </div>
-            )}
           </div>
         )}
 
         {state === 'done' && results.length > 0 && (
-          <div className="bg-white/5 rounded-xl p-8 border border-white/10 space-y-6">
-            <h2 className="text-2xl font-semibold">✅ Separation Complete!</h2>
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold text-white">🎉 Separation Complete!</h2>
+              <button
+                onClick={handleReset}
+                className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 text-sm transition-colors border border-white/10"
+              >
+                Start Over
+              </button>
+            </div>
 
-            {results.map((result, idx) => (
-              <div key={idx} className="bg-white/5 rounded-lg p-4 border border-white/10">
-                <div className="flex justify-between items-center mb-3">
-                  <h3 className="text-xl font-semibold">{result.name}</h3>
-                  <div className="flex gap-2">
-                    {result.name === 'Vocals' && (
-                      <button
-                        onClick={handleTranscribe}
-                        disabled={isTranscribing}
-                        className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg font-medium transition"
-                      >
-                        {isTranscribing ? '🎼 Transcribing...' : '🎼 Create MIDI'}
-                      </button>
-                    )}
-                    <button
-                      onClick={() => {
-                        const blob = new Blob([result.wavData], { type: 'audio/wav' });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `${audioFile?.name.replace(/\.[^.]+$/, '') || 'audio'}_${result.name.toLowerCase()}.wav`;
-                        a.click();
-                        URL.revokeObjectURL(url);
-                      }}
-                      className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg font-medium transition"
-                    >
-                      ⬇️ Download WAV
-                    </button>
-                  </div>
-                </div>
-                <audio controls className="w-full">
-                  <source src={URL.createObjectURL(new Blob([result.wavData], { type: 'audio/wav' }))} type="audio/wav" />
-                </audio>
+            {originalUrl && (
+              <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                <AudioPlayer audioUrl={originalUrl} label="Original" color="violet" />
               </div>
-            ))}
+            )}
 
-            {progress.transcriptionProgress && (
-              <div className="bg-white/5 rounded-lg p-4 border border-white/10">
-                <div className="flex justify-between mb-2">
-                  <span>{progress.transcriptionProgress.message}</span>
-                  <span>{Math.round(progress.transcriptionProgress.progress)}%</span>
-                </div>
-                <div className="w-full bg-white/10 rounded-full h-2">
-                  <div
-                    className="bg-purple-600 h-2 rounded-full transition-all"
-                    style={{ width: `${progress.transcriptionProgress.progress}%` }}
+            {results.map((result, idx) => {
+              const colors: Array<'pink' | 'blue'> = ['pink', 'blue'];
+              const icons: Record<string, string> = {
+                'Vocals': '🎤',
+                'Instrumental': '🎸',
+              };
+              
+              return (
+                <div key={idx} className="p-4 rounded-xl bg-white/5 border border-white/10">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">{icons[result.stemName] || '🎵'}</span>
+                      <span className="font-medium text-white">{result.stemName}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {result.stemName === 'Vocals' && (
+                        <button
+                          onClick={handleTranscribe}
+                          disabled={isTranscribing}
+                          className="px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 text-sm font-medium transition-colors border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isTranscribing ? '🎼 Transcribing...' : '🎼 Create MIDI'}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          const blob = new Blob([result.wavData], { type: 'audio/wav' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_${result.stemName.toLowerCase()}.wav`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-green-500/20 hover:bg-green-500/30 text-green-400 text-sm font-medium transition-colors border border-green-500/30"
+                      >
+                        ⬇️ Download WAV
+                      </button>
+                    </div>
+                  </div>
+                  <AudioPlayer 
+                    audioUrl={resultUrls[idx]} 
+                    label={result.stemName}
+                    color={colors[idx % colors.length]}
                   />
                 </div>
+              );
+            })}
+
+            {isTranscribing && progress.transcriptionProgress && (
+              <div className="p-4 rounded-xl bg-purple-500/10 border border-purple-500/20">
+                <ProgressBar
+                  progress={progress.transcriptionProgress.progress}
+                  message={progress.transcriptionProgress.message}
+                  variant="separation"
+                />
               </div>
             )}
 
             {midiData && (
-              <div className="bg-purple-500/20 rounded-lg p-4 border border-purple-500/30">
-                <div className="flex justify-between items-center">
-                  <div>
-                    <h3 className="text-xl font-semibold">🎼 MIDI Ready!</h3>
-                    <p className="text-gray-400">Size: {(midiData.length / 1024).toFixed(2)} KB</p>
+              <div className="p-4 rounded-xl bg-purple-500/10 border border-purple-500/20">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-2xl">🎼</span>
+                    <div>
+                      <p className="font-medium text-white">MIDI Transcription Ready!</p>
+                      <p className="text-sm text-gray-400">Click to download the MIDI file</p>
+                    </div>
                   </div>
                   <button
-                    onClick={() => downloadMidi(midiData, `${audioFile?.name.replace(/\.[^.]+$/, '') || 'audio'}_vocals.mid`)}
-                    className="px-6 py-3 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold transition"
+                    onClick={() => downloadMidi(midiData, `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_vocals.mid`)}
+                    className="px-4 py-2 rounded-lg bg-purple-500/30 hover:bg-purple-500/40 text-purple-300 font-medium transition-colors border border-purple-500/40"
                   >
                     ⬇️ Download MIDI
                   </button>
                 </div>
               </div>
             )}
-
-            <button
-              onClick={handleReset}
-              className="w-full py-3 bg-white/10 hover:bg-white/15 rounded-lg font-medium transition"
-            >
-              🔄 Start Over
-            </button>
           </div>
         )}
 
         {state === 'error' && (
-          <div className="bg-red-500/20 rounded-xl p-8 border border-red-500/30">
-            <h2 className="text-2xl font-semibold text-red-400 mb-4">⚠️ Error</h2>
-            <p className="mb-4">{errorMsg}</p>
+          <div className="space-y-4">
+            <div className="p-6 rounded-xl bg-red-500/10 border border-red-500/20">
+              <h3 className="text-lg font-medium text-red-400 mb-2">⚠️ Error</h3>
+              <p className="text-sm text-red-300">{errorMsg}</p>
+              <p className="text-xs text-red-400 mt-2">
+                💡 Tip: If model download fails, the app will try alternative mirrors automatically.
+                If all mirrors fail, try using a VPN. The model will be cached after first successful download.
+              </p>
+            </div>
             <button
               onClick={handleReset}
-              className="w-full py-3 bg-white/10 hover:bg-white/15 rounded-lg font-medium transition"
+              className="w-full py-3 px-6 rounded-xl bg-white/5 hover:bg-white/10 text-white font-medium transition-colors border border-white/10"
             >
-              🔄 Try Again
+              Try Again
             </button>
           </div>
         )}
 
-        <div className="mt-8 text-center text-sm text-gray-500">
-          <p>🔒 100% Private: All processing happens in your browser</p>
-          <p>🌐 Auto-mirrors: Tries multiple download sources automatically</p>
+        <div className="mt-12 pt-8 border-t border-white/10">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-400">
+            <div className="p-4 rounded-lg bg-white/5">
+              <h4 className="font-medium text-gray-300 mb-1">🌐 Browser Support</h4>
+              <p>Chrome 113+, Edge 113+, Safari 18+, Firefox 121+ (WebGPU). WASM works everywhere.</p>
+            </div>
+            <div className="p-4 rounded-lg bg-white/5">
+              <h4 className="font-medium text-gray-300 mb-1">⚡ Performance</h4>
+              <p>WebGPU is 3-5x faster than WASM. First model download: {selectedModel.size}.</p>
+            </div>
+            <div className="p-4 rounded-lg bg-white/5">
+              <h4 className="font-medium text-gray-300 mb-1">🧠 Model</h4>
+              <p>Demucs HT — 170 MB. Browser-optimized. MIT license.</p>
+            </div>
+          </div>
         </div>
-      </div>
+      </main>
     </div>
   );
 }
+
+export default App;

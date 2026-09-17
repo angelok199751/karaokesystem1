@@ -45,61 +45,51 @@ export async function downloadModel(
   url: string,
   onProgress?: (loaded: number, total: number) => void
 ): Promise<ArrayBuffer> {
-  const urlsToTry: string[] = [];
+  console.log('[ModelManager] Downloading from:', url);
   
-  if (url.includes('huggingface.co')) {
-    urlsToTry.push(url.replace('https://huggingface.co', 'https://hf-mirror.com'));
-    urlsToTry.push(url);
-    urlsToTry.push(url.replace('https://huggingface.co', 'https://hub.nuaa.cf'));
-  } else {
-    urlsToTry.push(url);
+  const response = await fetch(url, {
+    mode: 'cors',
+    credentials: 'omit',
+    redirect: 'follow',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download model: ${response.status} ${response.statusText}`);
   }
 
-  for (const tryUrl of urlsToTry) {
-    try {
-      const response = await fetch(tryUrl, {
-        mode: 'cors',
-        credentials: 'omit',
-        redirect: 'follow',
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const contentLength = response.headers.get('content-length');
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-
-      if (!response.body) {
-        throw new Error('Response body is null');
-      }
-
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let loaded = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        loaded += value.length;
-        onProgress?.(loaded, total);
-      }
-
-      const result = new Uint8Array(loaded);
-      let offset = 0;
-      for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      return result.buffer;
-    } catch (e) {
-      console.warn(`Failed to download from ${tryUrl}:`, e);
-    }
+  const contentType = response.headers.get('content-type');
+  if (contentType && contentType.includes('text/html')) {
+    throw new Error('Received HTML instead of model file. The URL may be incorrect or the file may not exist.');
   }
 
-  throw new Error('Failed to download model from all sources');
+  const contentLength = response.headers.get('content-length');
+  const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+  if (!response.body) {
+    throw new Error('Response body is null');
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    onProgress?.(loaded, total);
+  }
+
+  const result = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  console.log('[ModelManager] Downloaded', loaded, 'bytes');
+  return result.buffer;
 }
 
 export async function createSession(
