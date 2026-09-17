@@ -69,12 +69,18 @@ export async function downloadModel(
     return cached;
   }
 
-  // Try multiple URLs (direct + mirror)
-  const urlsToTry: string[] = [url];
+  // Try multiple URLs (direct + mirrors + proxies)
+  const urlsToTry: string[] = [];
   
-  if (url.includes('huggingface.co') && !url.includes('hf-mirror.com')) {
-    const mirrorUrl = url.replace('https://huggingface.co', 'https://hf-mirror.com');
-    urlsToTry.push(mirrorUrl);
+  if (url.includes('huggingface.co')) {
+    // Try Chinese mirror first (works in Russia)
+    urlsToTry.push(url.replace('https://huggingface.co', 'https://hf-mirror.com'));
+    // Try direct
+    urlsToTry.push(url);
+    // Try other mirrors
+    urlsToTry.push(url.replace('https://huggingface.co', 'https://hub.nuaa.cf'));
+  } else {
+    urlsToTry.push(url);
   }
 
   let lastError: Error | null = null;

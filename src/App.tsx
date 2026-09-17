@@ -188,6 +188,7 @@ function App() {
           <p className="text-sm text-indigo-200">
             <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server. 
             Models are cached locally after first download. Uses <strong>Demucs HT</strong> — browser-optimized vocal separation.
+            <br/><strong>🌐 Auto-mirrors:</strong> Automatically tries multiple download sources (hf-mirror.com, etc.) — VPN may not be needed!
           </p>
         </div>
 
@@ -341,9 +342,8 @@ function App() {
               <h3 className="text-lg font-medium text-red-400 mb-2">⚠️ Error</h3>
               <p className="text-sm text-red-300">{errorMsg}</p>
               <p className="text-xs text-red-400 mt-2">
-                💡 Tip: If model download fails, try using a VPN or wait and retry. 
-                The model will be cached after first successful download.
-              </p>
+              💡 Tip: If model download fails, the app will try alternative mirrors automatically. 
+              If all mirrors fail, try using a VPN. The model will be cached after first successful download.              </p>
             </div>
             <button
               onClick={handleReset}
