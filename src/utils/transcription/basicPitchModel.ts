@@ -4,7 +4,7 @@
  */
 import * as ort from 'onnxruntime-web';
 
-const MODEL_URL = 'https://huggingface.co/AEmotionStudio/basic-pitch-onnx-models/resolve/main/model.onnx';
+const MODEL_URL = 'https://huggingface.co/AEmotionStudio/basic-pitch-onnx-models/resolve/main/nmp.onnx';
 
 let session: ort.InferenceSession | null = null;
 
