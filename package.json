@@ -15,6 +15,7 @@
     "@webgpu/types": "^0.1.72",
     "canvas-confetti": "^1.9.3",
     "date-fns": "^2.30.0",
+    "demucs-web": "^1.0.2",
     "framer-motion": "^11.16.1",
     "lucide-react": "^0.294.0",
     "onnxruntime-web": "^1.21.0",

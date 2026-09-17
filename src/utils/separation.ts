@@ -1,7 +1,8 @@
 /**
- * Audio separation using HT-Demucs FT ONNX
- * Simple audio-to-audio separation - no manual STFT needed!
+ * Audio separation using demucs-web
+ * Optimized for browser with 170MB model
  */
+import { DemucsProcessor } from 'demucs-web';
 import * as ort from 'onnxruntime-web';
 import { ModelConfig } from './modelManager';
 
@@ -68,123 +69,44 @@ export async function separateAudio(
     ? resample(right, originalSampleRate, modelConfig.sampleRate)
     : new Float32Array(right);
 
-  const totalSamples = procLeft.length;
-  const chunkSize = modelConfig.chunkSamples; // 343980
+  onProgress?.({ stage: 'processing', progress: 10, message: 'Initializing Demucs processor...' });
+
+  // Create DemucsProcessor
+  const processor = new DemucsProcessor({
+    ort,
+    onProgress: (p: any) => {
+      const progress = typeof p === 'number' ? p : (p.progress || 0);
+      onProgress?.({
+        stage: 'processing',
+        progress: 20 + progress * 70,
+        message: `Processing: ${Math.round(progress * 100)}%`,
+      });
+    },
+    onLog: (phase: string, msg: string) => {
+      console.log(`[Demucs:${phase}] ${msg}`);
+    },
+  });
+
+  // Load model into processor
+  await processor.loadModel(modelConfig.url);
+
+  onProgress?.({ stage: 'processing', progress: 30, message: 'Separating audio...' });
+
+  // Separate audio
+  const result = await processor.separate(procLeft, procRight);
+
+  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Building output...' });
+
+  // Extract vocals and instrumental
+  const vocalsL = result.vocals.left;
+  const vocalsR = result.vocals.right;
   
-  // Calculate chunk positions with 25% overlap
-  const overlap = 4; // 25% overlap
-  const step = Math.floor(chunkSize / overlap);
-  const starts: number[] = [];
-  for (let s = 0; s < totalSamples; s += step) {
-    starts.push(s);
-  }
-
-  // Accumulators for overlap-add
-  // Output shape: (1, 4, 2, 343980) = [drums, bass, other, vocals]
-  const stemsAccum: Float32Array[] = [
-    new Float32Array(totalSamples * 2), // drums (stereo)
-    new Float32Array(totalSamples * 2), // bass (stereo)
-    new Float32Array(totalSamples * 2), // other (stereo)
-    new Float32Array(totalSamples * 2), // vocals (stereo)
-  ];
-  const count = new Float32Array(totalSamples);
-
-  const t0 = performance.now();
-
-  for (let ci = 0; ci < starts.length; ci++) {
-    const start = starts[ci];
-    const end = Math.min(start + chunkSize, totalSamples);
-    const chunkLen = end - start;
-
-    // Extract chunk and pad to chunkSize
-    const chunkL = new Float32Array(chunkSize);
-    const chunkR = new Float32Array(chunkSize);
-    chunkL.set(procLeft.subarray(start, end));
-    chunkR.set(procRight.subarray(start, end));
-
-    // Create input tensor: (1, 2, 343980) - interleaved stereo
-    const inputData = new Float32Array(2 * chunkSize);
-    for (let i = 0; i < chunkSize; i++) {
-      inputData[i] = chunkL[i];           // Left channel
-      inputData[chunkSize + i] = chunkR[i]; // Right channel
-    }
-
-    const inputTensor = new ort.Tensor('float32', inputData, [1, 2, chunkSize]);
-    
-    const feeds: Record<string, ort.Tensor> = {};
-    feeds[modelConfig.inputName] = inputTensor;
-    
-    // Run ONNX inference
-    const results = await session.run(feeds);
-    const outputData = results[modelConfig.outputName].data as Float32Array;
-    
-    // Output shape: (1, 4, 2, chunkSize)
-    // Extract each stem and accumulate
-    for (let stemIdx = 0; stemIdx < 4; stemIdx++) {
-      const stemOffset = stemIdx * 2 * chunkSize;
-      
-      for (let i = 0; i < chunkLen; i++) {
-        // Left channel
-        const leftVal = outputData[stemOffset + i];
-        stemsAccum[stemIdx][start + i] += leftVal;
-        
-        // Right channel
-        const rightVal = outputData[stemOffset + chunkSize + i];
-        stemsAccum[stemIdx][totalSamples + start + i] += rightVal;
-      }
-    }
-    
-    for (let i = 0; i < chunkLen; i++) {
-      count[start + i] += 1;
-    }
-
-    // Progress
-    const frac = (ci + 1) / starts.length;
-    const elapsed = (performance.now() - t0) / 1000;
-    const eta = elapsed / frac * (1 - frac);
-    
-    onProgress?.({
-      stage: 'processing',
-      progress: Math.round(frac * 100),
-      message: `Chunk ${ci + 1}/${starts.length} · ${elapsed.toFixed(1)}s elapsed · ~${eta.toFixed(0)}s remaining`,
-      chunk: ci + 1,
-      totalChunks: starts.length,
-      elapsed,
-      eta,
-    });
-
-    // Yield to UI
-    await new Promise(r => setTimeout(r, 0));
-  }
-
-  onProgress?.({ stage: 'reconstructing', progress: 90, message: 'Averaging overlaps...' });
-
-  // Average overlaps
-  for (let stemIdx = 0; stemIdx < 4; stemIdx++) {
-    for (let i = 0; i < totalSamples * 2; i++) {
-      const sampleIdx = i % totalSamples;
-      if (count[sampleIdx] > 0) {
-        stemsAccum[stemIdx][i] /= count[sampleIdx];
-      }
-    }
-  }
-
-  onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Building output...' });
-
-  // Extract vocals (stem 3) and instrumental (drums + bass + other)
-  const vocalsL = new Float32Array(totalSamples);
-  const vocalsR = new Float32Array(totalSamples);
-  const instrL = new Float32Array(totalSamples);
-  const instrR = new Float32Array(totalSamples);
-
-  for (let i = 0; i < totalSamples; i++) {
-    // Vocals = stem 3
-    vocalsL[i] = stemsAccum[3][i];
-    vocalsR[i] = stemsAccum[3][totalSamples + i];
-    
-    // Instrumental = drums (0) + bass (1) + other (2)
-    instrL[i] = stemsAccum[0][i] + stemsAccum[1][i] + stemsAccum[2][i];
-    instrR[i] = stemsAccum[0][totalSamples + i] + stemsAccum[1][totalSamples + i] + stemsAccum[2][totalSamples + i];
+  // Instrumental = drums + bass + other
+  const instrL = new Float32Array(vocalsL.length);
+  const instrR = new Float32Array(vocalsR.length);
+  for (let i = 0; i < vocalsL.length; i++) {
+    instrL[i] = result.drums.left[i] + result.bass.left[i] + result.other.left[i];
+    instrR[i] = result.drums.right[i] + result.bass.right[i] + result.other.right[i];
   }
 
   // Normalize
@@ -207,7 +129,7 @@ export async function separateAudio(
   const instrLNorm = normalize(instrL);
   const instrRNorm = normalize(instrR);
 
-  onProgress?.({ stage: 'reconstructing', progress: 98, message: 'Resampling and encoding...' });
+  onProgress?.({ stage: 'reconstructing', progress: 95, message: 'Resampling and encoding...' });
 
   // Resample back to original sample rate if needed
   let finalVocalsL: Float32Array = vocalsLNorm;

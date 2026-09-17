@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import * as ort from 'onnxruntime-web';
-import { MODELS, ModelConfig, createSession, checkWebGPUAvailability } from './utils/modelManager';
+import { MODELS, ModelConfig, checkWebGPUAvailability } from './utils/modelManager';
 import { separateAudio, SeparationResult, SeparationProgress } from './utils/separation';
 import { AudioPlayer } from './components/AudioPlayer';
 import { FileUpload } from './components/FileUpload';
@@ -85,23 +85,30 @@ function App() {
     });
 
     try {
-      // Create session (downloads model internally)
-      const { session, provider } = await createSession(selectedModel, webgpuAvailable);
-      sessionRef.current = session;
-      setActiveProvider(provider);
+      // Download model (demucs-web will load it internally)
+      const { downloadModel } = await import('./utils/modelManager');
+      await downloadModel(selectedModel.url, (loaded, total) => {
+        const progress = total > 0 ? (loaded / total) * 100 : 0;
+        setProgress(prev => ({
+          ...prev,
+          modelProgress: progress,
+          modelMessage: `Downloading model... ${Math.round(progress)}%`,
+        }));
+      });
 
       setState('processing');
       setProgress(prev => ({
         ...prev,
         modelProgress: 100,
-        modelMessage: `Model loaded! Using ${provider.toUpperCase()}. Starting separation...`,
+        modelMessage: `Model loaded! Starting separation...`,
       }));
+      setActiveProvider('demucs-web');
 
-      // Separate audio
+      // Separate audio using demucs-web
       const separationResults = await separateAudio(
         audioBuffer,
         selectedModel,
-        session,
+        null as any, // session not needed, demucs-web manages it
         (sepProgress: SeparationProgress) => {
           setProgress(prev => ({
             ...prev,
@@ -158,7 +165,7 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">Audio Separator</h1>
-              <p className="text-xs text-gray-400">HT-Demucs FT — State-of-the-art vocal separation</p>
+              <p className="text-xs text-gray-400">Demucs HT — Browser-optimized vocal separation</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -180,7 +187,7 @@ function App() {
         <div className="mb-8 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
           <p className="text-sm text-indigo-200">
             <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server. 
-            Models are cached locally after first download. Uses <strong>HT-Demucs FT</strong> — state-of-the-art vocal separation (SDR 9.19 dB).
+            Models are cached locally after first download. Uses <strong>Demucs HT</strong> — browser-optimized vocal separation.
           </p>
         </div>
 
@@ -360,7 +367,7 @@ function App() {
             </div>
             <div className="p-4 rounded-lg bg-white/5">
               <h4 className="font-medium text-gray-300 mb-1">🧠 Model</h4>
-              <p>HT-Demucs FT — 316 MB. Best vocal SDR (9.19 dB). MIT license.</p>
+              <p>Demucs HT — 170 MB. Browser-optimized. MIT license.</p>
             </div>
           </div>
         </div>

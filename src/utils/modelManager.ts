@@ -1,6 +1,6 @@
 /**
- * HT-Demucs FT ONNX model manager
- * Simple audio-to-audio separation (no manual STFT needed!)
+ * Model manager for demucs-web
+ * Uses optimized Demucs model for browser (170MB)
  */
 import * as ort from 'onnxruntime-web';
 
@@ -12,9 +12,7 @@ export interface ModelConfig {
   size: string;
   stems: string[];
   sampleRate: number;
-  chunkSamples: number; // 343980 samples = 7.8s @ 44.1kHz
-  inputName: string;
-  outputName: string;
+  chunkSamples: number;
 }
 
 // HuggingFace URLs
@@ -22,20 +20,18 @@ const HF_BASE = 'https://huggingface.co';
 
 export const MODELS: ModelConfig[] = [
   {
-    id: 'htdemucs-ft-vocals',
-    name: 'HT-Demucs FT Vocals (Best Quality)',
-    description: 'State-of-the-art vocal separation. SDR 9.19 dB. 316MB.',
-    url: `${HF_BASE}/StemSplitio/htdemucs-ft-vocals-onnx/resolve/main/htdemucs_ft_vocals.onnx`,
-    size: '~316 MB',
+    id: 'demucs-web-htdemucs',
+    name: 'Demucs HT (Browser Optimized)',
+    description: 'Optimized for browser. 170MB. Best balance of quality and performance.',
+    url: `${HF_BASE}/timcsy/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx`,
+    size: '~170 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
     chunkSamples: 343980, // 7.8s @ 44.1kHz
-    inputName: 'mix',
-    outputName: 'stems',
   },
 ];
 
-const CACHE_NAME = 'audio-separator-models-v5';
+const CACHE_NAME = 'audio-separator-models-v6';
 
 export async function getCachedModel(modelUrl: string): Promise<ArrayBuffer | null> {
   try {
@@ -156,7 +152,7 @@ export async function createSession(
       
       const opts: ort.InferenceSession.SessionOptions = {
         executionProviders: [provider as unknown as ort.InferenceSession.ExecutionProviderConfig],
-        graphOptimizationLevel: 'all',
+        graphOptimizationLevel: 'basic',
       };
 
       if (provider === 'webgpu') {

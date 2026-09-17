@@ -13,21 +13,22 @@
 
 ## 🧠 Модель
 
-Используется **HT-Demucs FT** — первая полная ONNX-версия с проверенным паритетом:
+Используется **Demucs HT** — оптимизированная версия для браузера через пакет `demucs-web`:
 
-| Модель | Размер | SDR (вокал) | Описание |
-|--------|--------|-------------|----------|
-| HT-Demucs FT Vocals | 316 MB | 9.19 dB | Лучший open-source результат |
+| Модель | Размер | Описание |
+|--------|--------|----------|
+| Demucs HT Embedded | 170 MB | Оптимизирована для браузера |
 
 ### Выходы (2 stems):
-1. 🎤 **Vocals** — вокал (SDR 9.19 dB)
+1. 🎤 **Vocals** — вокал
 2. 🎸 **Instrumental** — drums + bass + other
 
 ### Источник модели:
-- **HuggingFace**: [StemSplitio/htdemucs-ft-vocals-onnx](https://huggingface.co/StemSplitio/htdemucs-ft-vocals-onnx)
+- **HuggingFace**: [timcsy/demucs-web-onnx](https://huggingface.co/timcsy/demucs-web-onnx)
+- **Пакет**: [demucs-web](https://www.npmjs.com/package/demucs-web)
 - **Лицензия**: MIT
 - **Архитектура**: Hybrid Transformer Demucs от Facebook Research
-- **Паритет**: Проверен с PyTorch версией (< 1e-3 max abs diff)
+- **Оптимизация**: Специально для браузерного использования с WebGPU/WASM
 
 ## 🌐 Загрузка модели
 
@@ -111,22 +112,22 @@ src/
 
 ## 📊 Технические детали
 
-- **Модель:** HT-Demucs FT (Hybrid Transformer Demucs)
+- **Модель:** Demucs HT (через demucs-web)
 - **Вход:** Стерео аудио (MP3, WAV, OGG, FLAC, M4A, AAC, WebM)
 - **Выход:** 2 WAV файла (vocals, instrumental)
-- **Формат входа:** (1, 2, 343980) - стерео аудио напрямую
-- **Формат выхода:** (1, 4, 2, 343980) - 4 дорожки (drums, bass, other, vocals)
+- **Формат входа:** waveform [1, 2, 343980] + magSpec [1, 4, 2048, 336]
+- **Формат выхода:** 4 дорожки (drums, bass, other, vocals)
 - **Чанк:** 343980 samples (7.8s @ 44.1kHz)
 - **Overlap:** 25% overlap-add для плавности
 
 ## 🔄 Как это работает
 
 1. **Загрузка аудио** — файл декодируется через Web Audio API
-2. **Загрузка модели** — ONNX модель скачивается с HuggingFace и кэшируется
+2. **Загрузка модели** — demucs-web загружает оптимизированную модель (170MB) и кэширует её
 3. **Разбиение на чанки** — аудио разбивается на 7.8-секундные сегменты с 25% перекрытием
-4. **Инференс** — каждый чанк подаётся в модель напрямую (без STFT!)
-5. **Извлечение stems** — модель возвращает 4 дорожки: drums, bass, other, vocals
-6. **Объединение** — Vocals = vocals stem, Instrumental = drums + bass + other
+4. **Подготовка входа** — для каждого чанка создаётся waveform и magnitude spectrogram
+5. **Инференс** — модель обрабатывает оба входа и возвращает 4 дорожки
+6. **Извлечение stems** — Vocals = vocals stem, Instrumental = drums + bass + other
 7. **Overlap-add** — чанки собираются обратно с учётом перекрытий
 8. **Нормализация** — сигнал нормализуется до 0.95 peak
 9. **Экспорт** — результаты кодируются в WAV для воспроизведения/скачивания
@@ -135,16 +136,17 @@ src/
 
 - **WebGPU:** ~0.5x realtime (зависит от GPU)
 - **WASM:** ~2-3x realtime (зависит от CPU)
-- **Первая загрузка:** 316 MB (далее из кэша)
-- **3-минутная песня:** ~88s на M4 Pro CPU
+- **Первая загрузка:** 170 MB (далее из кэша)
+- **3-минутная песня:** ~60-90s (зависит от оборудования)
 
 ## 🐛 Известные ограничения
 
-- Первая загрузка модели занимает время (316 MB)
+- Первая загрузка модели занимает время (170 MB)
 - Разделение на слабых машинах может занять несколько минут
 - GitHub Pages лимит трафика: 100 GB/месяц
 - WebGPU может не работать на старых GPU или в некоторых браузерах
 - Если HuggingFace заблокирован — нужен VPN для первой загрузки
+- Модель оптимизирована для браузера, но всё ещё требует значительных ресурсов
 
 ## 📄 Лицензия
 
@@ -152,7 +154,7 @@ MIT
 
 ## 🙏 Благодарности
 
-- **Модель:** [StemSplitio/htdemucs-ft-onnx](https://huggingface.co/StemSplitio/htdemucs-ft-onnx)
+- **Пакет:** [demucs-web](https://www.npmjs.com/package/demucs-web) — готовая реализация для браузера
+- **Модель:** [timcsy/demucs-web-onnx](https://huggingface.co/timcsy/demucs-web-onnx) — оптимизированная ONNX версия
 - **Архитектура:** [facebookresearch/demucs](https://github.com/facebookresearch/demucs) (Hybrid Transformer Demucs)
-- **ONNX экспорт:** [StemSplit](https://stemsplit.io/)
 - **ONNX Runtime:** [onnxruntime-web](https://github.com/microsoft/onnxruntime)
