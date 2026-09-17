@@ -23,15 +23,17 @@ export interface ModelConfig {
   outputName: string;
 }
 
-// GitHub Releases URL - works in Russia without VPN
-const GITHUB_BASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models';
+// UVR models from official repository - works in Russia without VPN
+
+// GitHub proxy that works in Russia and supports CORS
+const GITHUB_PROXY = 'https://ghfast.top/';
 
 export const MODELS: ModelConfig[] = [
   {
     id: 'uvr-mdxnet-9482',
     name: 'UVR-MDX-NET 9482 (Fast)',
     description: 'Fast vocal separation. 28MB. Good balance of speed and quality.',
-    url: `${GITHUB_BASE}/UVR_MDXNET_9482.onnx`,
+    url: `${GITHUB_PROXY}https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR_MDXNET_9482.onnx`,
     size: '~28 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -47,7 +49,7 @@ export const MODELS: ModelConfig[] = [
     id: 'uvr-mdxnet-voc-ft',
     name: 'UVR-MDX-NET Voc_FT (Best Quality)',
     description: 'High-quality vocal separation. 64MB. Best results.',
-    url: `${GITHUB_BASE}/UVR-MDX-NET-Voc_FT.onnx`,
+    url: `${GITHUB_PROXY}https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Voc_FT.onnx`,
     size: '~64 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -63,7 +65,7 @@ export const MODELS: ModelConfig[] = [
     id: 'uvr-mdxnet-inst-hq4',
     name: 'UVR-MDX-NET Inst_HQ_4 (Alternative)',
     description: 'Alternative high-quality model. 56MB. Different training.',
-    url: `${GITHUB_BASE}/UVR-MDX-NET-Inst_HQ_4.onnx`,
+    url: `${GITHUB_PROXY}https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Inst_HQ_4.onnx`,
     size: '~56 MB',
     stems: ['Vocals', 'Instrumental'],
     sampleRate: 44100,
@@ -115,47 +117,65 @@ export async function downloadModel(
     return cached;
   }
 
-  // Download with progress tracking
-  const response = await fetch(url, {
-    mode: 'cors',
-    credentials: 'omit',
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to download model: ${response.status} ${response.statusText}`);
+  // Try to download with fallback URLs
+  const urlsToTry = [url];
+  
+  // If using proxy, also try direct URL as fallback
+  if (url.includes(GITHUB_PROXY)) {
+    const directUrl = url.replace(GITHUB_PROXY, '');
+    urlsToTry.push(directUrl);
   }
 
-  const contentLength = response.headers.get('content-length');
-  const total = contentLength ? parseInt(contentLength, 10) : 0;
+  let lastError: Error | null = null;
+  
+  for (const tryUrl of urlsToTry) {
+    try {
+      const response = await fetch(tryUrl, {
+        redirect: 'follow',
+      });
 
-  if (!response.body) {
-    throw new Error('Response body is null');
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const contentLength = response.headers.get('content-length');
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+      if (!response.body) {
+        throw new Error('Response body is null');
+      }
+
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let loaded = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        onProgress?.(loaded, total);
+      }
+
+      // Combine chunks
+      const result = new Uint8Array(loaded);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      // Cache the model
+      await cacheModel(url, result.buffer);
+
+      return result.buffer;
+    } catch (e) {
+      console.warn(`Failed to download from ${tryUrl}:`, e);
+      lastError = e instanceof Error ? e : new Error(String(e));
+    }
   }
 
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loaded = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    loaded += value.length;
-    onProgress?.(loaded, total);
-  }
-
-  // Combine chunks
-  const result = new Uint8Array(loaded);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  // Cache the model
-  await cacheModel(url, result.buffer);
-
-  return result.buffer;
+  throw lastError || new Error('Failed to download model from all sources');
 }
 
 export async function checkWebGPUAvailability(): Promise<boolean> {
