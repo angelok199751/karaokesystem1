@@ -2,6 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import * as Tone from 'tone';
 import { PianoRoll } from './PianoRoll';
 import { KaraokeNote, KaraokeJSON } from '../utils/transcription/karaokeJSON';
+import { MidiCleanerPanel } from './MidiCleanerPanel';
+import { LyricsImporter } from './LyricsImporter';
+import { cleanMidi, CleanerOptions } from '../utils/transcription/midiCleaner';
+import { alignNotesToLyrics, downloadAlignedKaraoke, LyricsFile, AlignedKaraokeFile } from '../utils/transcription/lyricsAligner';
 
 interface MidiEditorProps {
   karaokeJSON: KaraokeJSON;
@@ -13,6 +17,8 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [selectedNoteIndex, setSelectedNoteIndex] = useState<number | null>(null);
   const [volume, setVolume] = useState(-10);
+  const [lyrics, setLyrics] = useState<LyricsFile | null>(null);
+  const [alignedData, setAlignedData] = useState<AlignedKaraokeFile | null>(null);
   const synthRef = useRef<Tone.PolySynth | null>(null);
   const animationRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
@@ -207,6 +213,28 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
     return phraseIndex * 1000 + noteIndex;
   };
 
+  // Обработка очистки MIDI
+  const handleClean = (options: CleanerOptions) => {
+    const cleaned = cleanMidi(karaokeJSON, options);
+    onUpdate(cleaned);
+  };
+
+  // Обработка импорта текста
+  const handleLyricsImport = (importedLyrics: LyricsFile) => {
+    setLyrics(importedLyrics);
+    
+    // Автоматически выравниваем ноты по тексту
+    const aligned = alignNotesToLyrics(karaokeJSON, importedLyrics);
+    setAlignedData(aligned);
+  };
+
+  // Скачивание выровненного файла
+  const handleDownloadAligned = () => {
+    if (alignedData) {
+      downloadAlignedKaraoke(alignedData, 'karaoke_aligned.json');
+    }
+  };
+
   const selectedNote = selectedNoteIndex !== null 
     ? allNotes[selectedNoteIndex % 1000]
     : null;
@@ -332,6 +360,32 @@ export function MidiEditor({ karaokeJSON, onUpdate }: MidiEditorProps) {
                 {(selectedNote.end - selectedNote.start).toFixed(3)}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MIDI Cleaner */}
+      <MidiCleanerPanel onClean={handleClean} />
+
+      {/* Lyrics Importer */}
+      <LyricsImporter onImport={handleLyricsImport} />
+
+      {/* Aligned Data Download */}
+      {alignedData && (
+        <div className="bg-green-500/20 border border-green-500/30 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-semibold text-green-300">✓ Текст выровнен</h3>
+              <p className="text-sm text-green-200">
+                {alignedData.segments.length} сегментов, {alignedData.segments.reduce((sum, s) => sum + s.notes.length, 0)} нот привязано
+              </p>
+            </div>
+            <button
+              onClick={handleDownloadAligned}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg font-medium transition"
+            >
+              ⬇️ Скачать выровненный файл
+            </button>
           </div>
         </div>
       )}

@@ -93,3 +93,21 @@ export {
   downloadKaraokeJSON 
 } from './karaokeJSON';
 export type { KaraokeNote, KaraokePhrase, KaraokeJSON } from './karaokeJSON';
+
+// Re-export MIDI cleaner
+export { cleanMidi } from './midiCleaner';
+export type { CleanerOptions } from './midiCleaner';
+
+// Re-export lyrics aligner
+export { 
+  alignNotesToLyrics, 
+  exportAlignedKaraoke, 
+  downloadAlignedKaraoke 
+} from './lyricsAligner';
+export type { 
+  LyricSegment, 
+  LyricsFile, 
+  AlignedNote, 
+  AlignedSegment, 
+  AlignedKaraokeFile 
+} from './lyricsAligner';
