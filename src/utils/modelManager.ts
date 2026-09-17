@@ -1,5 +1,6 @@
 /**
  * Model manager: handles downloading, caching, and loading ONNX models
+ * Using bgkb/bs_polarformer - a real working model for browser-based vocal separation
  */
 import * as ort from 'onnxruntime-web';
 
@@ -7,60 +8,67 @@ export interface ModelConfig {
   id: string;
   name: string;
   description: string;
-  url: string;
+  wasmUrl: string;
+  webgpuUrl: string;
   size: string;
   stems: string[];
+  // Audio processing params
+  sampleRate: number;
   nFft: number;
   hopLength: number;
-  sampleRate: number;
-  chunkDuration: number; // seconds
+  winLength: number;
+  chunkSize: number; // samples per chunk
+  overlap: number;
+  // Model I/O
+  inputName: string;
+  outputName: string;
 }
+
+const HF_BASE = 'https://huggingface.co/bgkb/bs_polarformer/resolve/main';
 
 export const MODELS: ModelConfig[] = [
   {
-    id: 'mdx-net-vocals',
-    name: 'MDX-Net Vocals (Fast)',
-    description: 'Lightweight model for vocal/instrumental separation. ~30MB. Good quality, fast inference.',
-    url: 'https://huggingface.co/joao-matias/mdxnet-vocals-onnx/resolve/main/model.onnx',
-    size: '~30 MB',
+    id: 'bs-polarformer-fp16',
+    name: 'BS PolarFormer FP16 (Recommended)',
+    description: 'High-quality vocal separation. 103MB. Best balance of quality and speed.',
+    wasmUrl: `${HF_BASE}/bs_polarformer_fp16.onnx`,
+    webgpuUrl: `${HF_BASE}/bs_polarformer_webgpu_fp16.onnx`,
+    size: '~103 MB',
     stems: ['Vocals', 'Instrumental'],
-    nFft: 1024,
+    sampleRate: 44100,
+    nFft: 2048,
     hopLength: 512,
-    sampleRate: 44100,
-    chunkDuration: 10,
+    winLength: 2048,
+    chunkSize: 131072,
+    overlap: 2,
+    inputName: 'stft_features',
+    outputName: 'mask',
   },
   {
-    id: 'mdx-net-kim',
-    name: 'Kim Vocal 2 (Balanced)',
-    description: 'Kim_Vocal_2 model for high-quality vocal separation. ~67MB. Better quality than fast model.',
-    url: 'https://huggingface.co/joao-matias/kim-vocal-2-onnx/resolve/main/model.onnx',
-    size: '~67 MB',
+    id: 'bs-polarformer-fp32',
+    name: 'BS PolarFormer FP32 (Highest Quality)',
+    description: 'Maximum quality vocal separation. 201MB. Slower download but best results.',
+    wasmUrl: `${HF_BASE}/bs_polarformer.onnx`,
+    webgpuUrl: `${HF_BASE}/bs_polarformer_webgpu.onnx`,
+    size: '~201 MB',
     stems: ['Vocals', 'Instrumental'],
-    nFft: 768,
-    hopLength: 384,
     sampleRate: 44100,
-    chunkDuration: 10,
-  },
-  {
-    id: 'demucs-htdemucs',
-    name: 'HTDemucs (4 stems)',
-    description: 'Demucs-style 4-stem separation: drums, bass, other, vocals. ~80MB.',
-    url: 'https://huggingface.co/joao-matias/htdemucs-onnx/resolve/main/model.onnx',
-    size: '~80 MB',
-    stems: ['Drums', 'Bass', 'Other', 'Vocals'],
-    nFft: 4096,
-    hopLength: 1024,
-    sampleRate: 44100,
-    chunkDuration: 10,
+    nFft: 2048,
+    hopLength: 512,
+    winLength: 2048,
+    chunkSize: 131072,
+    overlap: 2,
+    inputName: 'stft_features',
+    outputName: 'mask',
   },
 ];
 
-const CACHE_NAME = 'audio-separator-models-v1';
+const CACHE_NAME = 'audio-separator-models-v2';
 
-export async function getCachedModel(modelId: string): Promise<ArrayBuffer | null> {
+export async function getCachedModel(modelUrl: string): Promise<ArrayBuffer | null> {
   try {
     const cache = await caches.open(CACHE_NAME);
-    const response = await cache.match(modelId);
+    const response = await cache.match(modelUrl);
     if (response) {
       return await response.arrayBuffer();
     }
@@ -70,31 +78,31 @@ export async function getCachedModel(modelId: string): Promise<ArrayBuffer | nul
   return null;
 }
 
-export async function cacheModel(modelId: string, modelBuffer: ArrayBuffer): Promise<void> {
+export async function cacheModel(modelUrl: string, modelBuffer: ArrayBuffer): Promise<void> {
   try {
     const cache = await caches.open(CACHE_NAME);
     const response = new Response(modelBuffer, {
       headers: { 'Content-Type': 'application/octet-stream' },
     });
-    await cache.put(modelId, response);
+    await cache.put(modelUrl, response);
   } catch (e) {
     console.warn('Cache write failed:', e);
   }
 }
 
 export async function downloadModel(
-  config: ModelConfig,
+  url: string,
   onProgress?: (loaded: number, total: number) => void
 ): Promise<ArrayBuffer> {
   // Check cache first
-  const cached = await getCachedModel(config.id);
+  const cached = await getCachedModel(url);
   if (cached) {
     onProgress?.(cached.byteLength, cached.byteLength);
     return cached;
   }
 
   // Download with progress tracking
-  const response = await fetch(config.url, {
+  const response = await fetch(url, {
     mode: 'cors',
     credentials: 'omit',
   });
@@ -131,40 +139,9 @@ export async function downloadModel(
   }
 
   // Cache the model
-  await cacheModel(config.id, result.buffer);
+  await cacheModel(url, result.buffer);
 
   return result.buffer;
-}
-
-export async function createSession(
-  modelBuffer: ArrayBuffer,
-  useWebGPU: boolean = true
-): Promise<ort.InferenceSession> {
-  // Try providers in order of preference
-  const providers: string[] = [];
-  
-  if (useWebGPU) {
-    try {
-      const gpuAvailable = await checkWebGPUAvailability();
-      if (gpuAvailable) {
-        providers.push('webgpu');
-      }
-    } catch {
-      // WebGPU not available
-    }
-  }
-
-  // Fallback to WASM (single-threaded for GitHub Pages compatibility)
-  providers.push('wasm');
-
-  const session = await ort.InferenceSession.create(modelBuffer, {
-    executionProviders: providers as unknown as ort.InferenceSession.ExecutionProviderConfig[],
-    graphOptimizationLevel: 'all',
-    enableCpuMemArena: true,
-    enableMemPattern: true,
-  });
-
-  return session;
 }
 
 export async function checkWebGPUAvailability(): Promise<boolean> {
@@ -176,4 +153,52 @@ export async function checkWebGPUAvailability(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export async function createSession(
+  modelConfig: ModelConfig,
+  useWebGPU: boolean
+): Promise<{ session: ort.InferenceSession; provider: string }> {
+  const nFreq = modelConfig.nFft / 2 + 1;
+  const probeFrames = Math.floor((modelConfig.chunkSize - modelConfig.nFft) / modelConfig.hopLength) + 1;
+  const probeFeatures = nFreq * 2 * 2; // N_FREQ * AUDIO_CH * 2
+
+  const providers = useWebGPU ? ['webgpu', 'wasm'] : ['wasm'];
+  let lastError: Error | null = null;
+
+  for (const provider of providers) {
+    try {
+      const modelUrl = provider === 'webgpu' ? modelConfig.webgpuUrl : modelConfig.wasmUrl;
+      
+      // Download model
+      const modelBuffer = await downloadModel(modelUrl);
+      
+      const opts: ort.InferenceSession.SessionOptions = {
+        executionProviders: [provider as ort.InferenceSession.ExecutionProviderConfig],
+        graphOptimizationLevel: 'all',
+      };
+
+      if (provider === 'webgpu') {
+        (ort.env as any).webgpu = (ort.env as any).webgpu || {};
+        (ort.env as any).webgpu.powerPreference = 'high-performance';
+      }
+
+      const session = await ort.InferenceSession.create(modelBuffer, opts);
+
+      // Warmup run to catch WebGPU shader errors early
+      const probeInput = new ort.Tensor(
+        'float32',
+        new Float32Array(probeFrames * probeFeatures),
+        [1, probeFrames, probeFeatures]
+      );
+      await session.run({ [modelConfig.inputName]: probeInput });
+
+      return { session, provider };
+    } catch (e) {
+      console.warn(`Failed to initialize ${provider} backend:`, e);
+      lastError = e instanceof Error ? e : new Error(String(e));
+    }
+  }
+
+  throw lastError || new Error('Failed to create inference session.');
 }

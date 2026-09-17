@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import * as ort from 'onnxruntime-web';
-import { MODELS, ModelConfig, downloadModel, createSession, checkWebGPUAvailability } from './utils/modelManager';
+import { MODELS, ModelConfig, createSession, checkWebGPUAvailability } from './utils/modelManager';
 import { separateAudio, SeparationResult, SeparationProgress } from './utils/separation';
 import { AudioPlayer } from './components/AudioPlayer';
 import { FileUpload } from './components/FileUpload';
@@ -29,35 +29,18 @@ function App() {
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [webgpuAvailable, setWebgpuAvailable] = useState<boolean>(false);
   const [originalUrl, setOriginalUrl] = useState<string>('');
+  const [activeProvider, setActiveProvider] = useState<string>('');
   
   const sessionRef = useRef<ort.InferenceSession | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  
-  // Memoize blob URLs for results to avoid memory leaks
-  const resultUrls = useMemo(() => {
-    return results.map(result => {
-      const blob = new Blob([result.wavData], { type: 'audio/wav' });
-      return URL.createObjectURL(blob);
-    });
-  }, [results]);
-  
-  // Cleanup blob URLs on unmount or when results change
-  useEffect(() => {
-    return () => {
-      resultUrls.forEach(url => URL.revokeObjectURL(url));
-    };
-  }, [resultUrls]);
 
-  // Check WebGPU on mount
+  // Configure onnxruntime-web on mount
   useEffect(() => {
     checkWebGPUAvailability().then(setWebgpuAvailable);
     
-    // Configure onnxruntime-web to load WASM from CDN
-    // This avoids bundling large WASM files and works on GitHub Pages
-    ort.env.wasm.numThreads = 1; // Single-threaded for GitHub Pages compatibility (no SharedArrayBuffer)
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
-    
-    // Silence verbose logging
+    // Load WASM from CDN (not bundled)
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
     ort.env.logLevel = 'warning';
   }, []);
 
@@ -80,7 +63,6 @@ function App() {
       const buffer = await ctx.decodeAudioData(arrayBuffer);
       setAudioBuffer(buffer);
       
-      // Create URL for original playback
       const url = URL.createObjectURL(file);
       setOriginalUrl(url);
     } catch (err) {
@@ -95,6 +77,7 @@ function App() {
     setState('loading-model');
     setErrorMsg('');
     setResults([]);
+    setActiveProvider('');
     setProgress({
       modelProgress: 0,
       modelMessage: 'Starting download...',
@@ -102,28 +85,17 @@ function App() {
     });
 
     try {
-      // Download model
-      const modelBuffer = await downloadModel(selectedModel, (loaded, total) => {
-        const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
-        setProgress(prev => ({
-          ...prev,
-          modelProgress: pct,
-          modelMessage: total > 0 
-            ? `Downloading model... ${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB`
-            : `Downloading model... ${(loaded / 1024 / 1024).toFixed(1)}MB`,
-        }));
-      });
+      // Create session (downloads model internally)
+      const { session, provider } = await createSession(selectedModel, webgpuAvailable);
+      sessionRef.current = session;
+      setActiveProvider(provider);
 
       setState('processing');
       setProgress(prev => ({
         ...prev,
         modelProgress: 100,
-        modelMessage: 'Model loaded! Starting separation...',
+        modelMessage: `Model loaded! Using ${provider.toUpperCase()}. Starting separation...`,
       }));
-
-      // Create session
-      const session = await createSession(modelBuffer, webgpuAvailable);
-      sessionRef.current = session;
 
       // Separate audio
       const separationResults = await separateAudio(
@@ -153,12 +125,27 @@ function App() {
     setAudioBuffer(null);
     setResults([]);
     setErrorMsg('');
+    setActiveProvider('');
     setProgress({ modelProgress: 0, modelMessage: '', separationProgress: null });
     if (originalUrl) {
       URL.revokeObjectURL(originalUrl);
       setOriginalUrl('');
     }
   }, [originalUrl]);
+
+  // Memoize blob URLs for results
+  const resultUrls = useMemo(() => {
+    return results.map(result => {
+      const blob = new Blob([result.wavData], { type: 'audio/wav' });
+      return URL.createObjectURL(blob);
+    });
+  }, [results]);
+  
+  useEffect(() => {
+    return () => {
+      resultUrls.forEach(url => URL.revokeObjectURL(url));
+    };
+  }, [resultUrls]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-indigo-950">
@@ -171,7 +158,7 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">Audio Separator</h1>
-              <p className="text-xs text-gray-400">Split vocals & instrumentals in your browser</p>
+              <p className="text-xs text-gray-400">BS PolarFormer — Split vocals & instrumentals in your browser</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -193,7 +180,7 @@ function App() {
         <div className="mb-8 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
           <p className="text-sm text-indigo-200">
             <strong>🔒 100% Private:</strong> All processing happens in your browser. Audio files are never uploaded to any server. 
-            Models are cached locally after first download.
+            Models are cached locally after first download. Uses <strong>BS PolarFormer</strong> — a state-of-the-art vocal separation model.
           </p>
         </div>
 
@@ -210,7 +197,7 @@ function App() {
           <FileUpload onFileSelect={handleFileSelect} />
         )}
 
-        {/* File loaded - show info and separate button */}
+        {/* File loaded */}
         {state === 'file-loaded' && audioFile && audioBuffer && (
           <div className="space-y-6">
             <div className="p-6 rounded-xl bg-white/5 border border-white/10">
@@ -232,7 +219,6 @@ function App() {
                 </button>
               </div>
               
-              {/* Original audio player */}
               {originalUrl && (
                 <div className="mt-4">
                   <AudioPlayer audioUrl={originalUrl} label="Original" color="violet" />
@@ -244,17 +230,17 @@ function App() {
               onClick={handleSeparate}
               className="w-full py-4 px-6 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-semibold text-lg transition-all shadow-lg shadow-violet-500/25 hover:shadow-violet-500/40 active:scale-[0.98]"
             >
-              🎛️ Separate Audio
+              🎛️ Separate Vocals
             </button>
           </div>
         )}
 
-        {/* Loading model */}
+        {/* Loading / Processing */}
         {(state === 'loading-model' || state === 'processing') && (
           <div className="space-y-6">
             <ProgressBar
               progress={state === 'loading-model' ? progress.modelProgress : 100}
-              message={state === 'loading-model' ? progress.modelMessage : 'Model loaded!'}
+              message={state === 'loading-model' ? progress.modelMessage : `Model loaded! Using ${activeProvider.toUpperCase()}`}
               variant="model"
             />
             
@@ -271,8 +257,8 @@ function App() {
                 <div className="animate-spin w-5 h-5 border-2 border-violet-400 border-t-transparent rounded-full"></div>
                 <p className="text-sm text-gray-300">
                   {state === 'loading-model' 
-                    ? 'Downloading model... This may take a moment on first use. The model will be cached for future use.'
-                    : 'Processing audio through the model. This may take a few minutes depending on file length and hardware.'
+                    ? 'Downloading model... First time may take a while. The model will be cached for future use.'
+                    : 'Processing audio through the neural network. This may take a few minutes depending on file length and hardware.'
                   }
                 </p>
               </div>
@@ -306,10 +292,7 @@ function App() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <span className="text-lg">
-                      {result.stemName === 'Vocals' ? '🎤' : 
-                       result.stemName === 'Instrumental' ? '🎸' :
-                       result.stemName === 'Drums' ? '🥁' :
-                       result.stemName === 'Bass' ? '🎸' : '🎵'}
+                      {result.stemName === 'Vocals' ? '🎤' : '🎸'}
                     </span>
                     <span className="font-medium text-white">{result.stemName}</span>
                   </div>
@@ -331,7 +314,7 @@ function App() {
                 <AudioPlayer 
                   audioUrl={resultUrls[idx]} 
                   label={result.stemName}
-                  color={idx === 0 ? 'pink' : idx === 1 ? 'blue' : idx === 2 ? 'amber' : 'emerald'}
+                  color={idx === 0 ? 'pink' : 'blue'}
                 />
               </div>
             ))}
@@ -354,20 +337,20 @@ function App() {
           </div>
         )}
 
-        {/* Footer info */}
+        {/* Footer */}
         <div className="mt-12 pt-8 border-t border-white/10">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-400">
             <div className="p-4 rounded-lg bg-white/5">
               <h4 className="font-medium text-gray-300 mb-1">🌐 Browser Support</h4>
-              <p>Chrome 113+, Edge 113+, Safari 18+, Firefox 121+ (WebGPU)</p>
+              <p>Chrome 113+, Edge 113+, Safari 18+, Firefox 121+ (WebGPU). WASM works everywhere.</p>
             </div>
             <div className="p-4 rounded-lg bg-white/5">
               <h4 className="font-medium text-gray-300 mb-1">⚡ Performance</h4>
-              <p>WebGPU is 3-5x faster than WASM. First model load downloads {selectedModel.size}.</p>
+              <p>WebGPU is 3-5x faster than WASM. First model download: {selectedModel.size}.</p>
             </div>
             <div className="p-4 rounded-lg bg-white/5">
-              <h4 className="font-medium text-gray-300 mb-1">💾 Caching</h4>
-              <p>Models are cached in your browser. Subsequent uses are instant.</p>
+              <h4 className="font-medium text-gray-300 mb-1">🧠 Model</h4>
+              <p>BS PolarFormer — BSRoformer architecture with PoPE embeddings. SDR 11.0 on vocals.</p>
             </div>
           </div>
         </div>
