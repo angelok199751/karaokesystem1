@@ -153,21 +153,22 @@ function istftMDX(
     const frameRe = new Float32Array(nFft);
     const frameIm = new Float32Array(nFft);
     
-    // Copy dimF bins
+    // Copy dimF bins from model output
     for (let f = 0; f < dimF && f < nBins; f++) {
       frameRe[f] = spec[0 * dimF * numFrames + f * numFrames + t];
       frameIm[f] = spec[1 * dimF * numFrames + f * numFrames + t];
     }
     
-    // Mirror for negative frequencies
-    for (let f = 1; f < nBins; f++) {
-      if (f >= dimF) break;
+    // Mirror for negative frequencies (Hermitian symmetry)
+    for (let f = 1; f < nBins && f < dimF; f++) {
       frameRe[nFft - f] = frameRe[f];
       frameIm[nFft - f] = -frameIm[f];
     }
     
+    // Inverse FFT
     fftInPlace(frameRe, frameIm, nFft);
     
+    // Apply window and overlap-add
     const off = t * hop;
     for (let i = 0; i < nFft && off + i < outputLength; i++) {
       left[off + i] += frameRe[i] * window[i];
@@ -175,8 +176,7 @@ function istftMDX(
     }
   }
   
-  // Process right channel (channels 2, 3)
-  const winSumR = new Float32Array(outputLength);
+  // Process right channel (channels 2, 3) - use same winSum
   for (let t = 0; t < numFrames; t++) {
     const frameRe = new Float32Array(nFft);
     const frameIm = new Float32Array(nFft);
@@ -186,8 +186,7 @@ function istftMDX(
       frameIm[f] = spec[3 * dimF * numFrames + f * numFrames + t];
     }
     
-    for (let f = 1; f < nBins; f++) {
-      if (f >= dimF) break;
+    for (let f = 1; f < nBins && f < dimF; f++) {
       frameRe[nFft - f] = frameRe[f];
       frameIm[nFft - f] = -frameIm[f];
     }
@@ -197,14 +196,15 @@ function istftMDX(
     const off = t * hop;
     for (let i = 0; i < nFft && off + i < outputLength; i++) {
       right[off + i] += frameRe[i] * window[i];
-      winSumR[off + i] += window[i] * window[i];
     }
   }
   
-  // Normalize
+  // Normalize both channels with same window sum
   for (let i = 0; i < outputLength; i++) {
-    if (winSum[i] > 1e-8) left[i] /= winSum[i];
-    if (winSumR[i] > 1e-8) right[i] /= winSumR[i];
+    if (winSum[i] > 1e-8) {
+      left[i] /= winSum[i];
+      right[i] /= winSum[i];
+    }
   }
   
   return { left, right };
@@ -273,23 +273,21 @@ export async function separateAudio(
   const count = new Float32Array(totalSamples);
 
   const t0 = performance.now();
+  const trim = modelConfig.nFft / 2; // Padding size
 
   for (let ci = 0; ci < starts.length; ci++) {
     const start = starts[ci];
     const end = Math.min(start + chunkSize, totalSamples);
     const chunkLen = end - start;
 
-    // Extract chunk
-    const cL = new Float32Array(chunkSize);
-    const cR = new Float32Array(chunkSize);
-    cL.set(procLeft.subarray(start, end));
-    cR.set(procRight.subarray(start, end));
-
-    // Pad to chunk_size if needed
-    const paddedL = new Float32Array(chunkSize);
-    const paddedR = new Float32Array(chunkSize);
-    paddedL.set(cL);
-    paddedR.set(cR);
+    // Extract chunk with padding (like in Python code)
+    const paddedLength = trim + chunkLen + trim;
+    const paddedL = new Float32Array(paddedLength);
+    const paddedR = new Float32Array(paddedLength);
+    
+    // Add padding: [trim zeros] + [chunk] + [trim zeros]
+    paddedL.set(procLeft.subarray(start, end), trim);
+    paddedR.set(procRight.subarray(start, end), trim);
 
     // STFT: [1, 4, dim_f, dim_t]
     const spek = stftMDX(
@@ -311,20 +309,20 @@ export async function separateAudio(
     const results = await session.run(feeds);
     const outputSpec = results[modelConfig.outputName].data as Float32Array;
 
-    // iSTFT: get vocals
+    // iSTFT: get vocals (with padding)
     const vocals = istftMDX(
       outputSpec,
       modelConfig.nFft,
       modelConfig.hopLength,
       modelConfig.dimF,
       modelConfig.dimT,
-      chunkSize
+      paddedLength
     );
 
-    // Accumulate with overlap
+    // Remove padding and accumulate
     for (let i = 0; i < chunkLen; i++) {
-      vocalsL[start + i] += vocals.left[i];
-      vocalsR[start + i] += vocals.right[i];
+      vocalsL[start + i] += vocals.left[trim + i];
+      vocalsR[start + i] += vocals.right[trim + i];
       count[start + i] += 1;
     }
 
