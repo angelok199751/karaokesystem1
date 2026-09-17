@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { MODELS, ModelConfig, checkWebGPUAvailability } from './utils/modelManager';
 import { separateAudio, SeparationResult, SeparationProgress } from './utils/separation';
-import { transcribeAudio, downloadMidi, TranscriptionProgress } from './utils/transcription';
+import { transcribeAudio, downloadMidi, TranscriptionProgress, generateKaraokeJSON, downloadKaraokeJSON, TranscriptionResult } from './utils/transcription';
 import { AudioPlayer } from './components/AudioPlayer';
 import { FileUpload } from './components/FileUpload';
 import { ProgressBar } from './components/ProgressBar';
@@ -23,6 +23,7 @@ function App() {
   const [selectedModel, setSelectedModel] = useState<ModelConfig>(MODELS[0]);
   const [results, setResults] = useState<SeparationResult[]>([]);
   const [midiData, setMidiData] = useState<Uint8Array | null>(null);
+  const [transcriptionResult, setTranscriptionResult] = useState<TranscriptionResult | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [progress, setProgress] = useState<AppProgress>({
     modelProgress: 0,
@@ -53,6 +54,7 @@ function App() {
     setState('file-loaded');
     setResults([]);
     setMidiData(null);
+    setTranscriptionResult(null);
     setErrorMsg('');
     
     try {
@@ -76,6 +78,7 @@ function App() {
     setErrorMsg('');
     setResults([]);
     setMidiData(null);
+    setTranscriptionResult(null);
     setActiveProvider('demucs-web');
     setProgress({
       modelProgress: 100,
@@ -116,10 +119,11 @@ function App() {
 
     setIsTranscribing(true);
     setMidiData(null);
+    setTranscriptionResult(null);
     setErrorMsg('');
 
     try {
-      const midi = await transcribeAudio(
+      const output = await transcribeAudio(
         vocalsResult.audioBuffer,
         (transcriptionProgress) => {
           setProgress(prev => ({
@@ -129,7 +133,8 @@ function App() {
         }
       );
 
-      setMidiData(midi);
+      setMidiData(output.midiData);
+      setTranscriptionResult(output.transcriptionResult);
     } catch (err) {
       console.error('Transcription failed:', err);
       setErrorMsg(`Transcription failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -144,6 +149,7 @@ function App() {
     setAudioBuffer(null);
     setResults([]);
     setMidiData(null);
+    setTranscriptionResult(null);
     setIsTranscribing(false);
     setErrorMsg('');
     setActiveProvider('');
@@ -356,22 +362,33 @@ function App() {
               </div>
             )}
 
-            {midiData && (
+            {midiData && transcriptionResult && (
               <div className="p-4 rounded-xl bg-purple-500/10 border border-purple-500/20">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="text-2xl">🎼</span>
                     <div>
-                      <p className="font-medium text-white">MIDI Transcription Ready!</p>
-                      <p className="text-sm text-gray-400">Click to download the MIDI file</p>
+                      <p className="font-medium text-white">Transcription Ready!</p>
+                      <p className="text-sm text-gray-400">Download MIDI or Karaoke JSON</p>
                     </div>
                   </div>
-                  <button
-                    onClick={() => downloadMidi(midiData, `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_vocals.mid`)}
-                    className="px-4 py-2 rounded-lg bg-purple-500/30 hover:bg-purple-500/40 text-purple-300 font-medium transition-colors border border-purple-500/40"
-                  >
-                    ⬇️ Download MIDI
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => downloadMidi(midiData, `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_vocals.mid`)}
+                      className="px-4 py-2 rounded-lg bg-purple-500/30 hover:bg-purple-500/40 text-purple-300 font-medium transition-colors border border-purple-500/40"
+                    >
+                      ⬇️ MIDI
+                    </button>
+                    <button
+                      onClick={() => {
+                        const karaokeJSON = generateKaraokeJSON(transcriptionResult);
+                        downloadKaraokeJSON(karaokeJSON, `${audioFile?.name?.replace(/\.[^.]+$/, '') || 'audio'}_karaoke.json`);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-blue-500/30 hover:bg-blue-500/40 text-blue-300 font-medium transition-colors border border-blue-500/40"
+                    >
+                      ⬇️ Karaoke JSON
+                    </button>
+                  </div>
                 </div>
               </div>
             )}

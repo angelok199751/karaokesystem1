@@ -13,10 +13,15 @@ export interface TranscriptionProgress {
   message: string;
 }
 
+export interface TranscriptionOutput {
+  midiData: Uint8Array;
+  transcriptionResult: TranscriptionResult;
+}
+
 export async function transcribeAudio(
   audioBuffer: AudioBuffer,
   onProgress?: (progress: TranscriptionProgress) => void
-): Promise<Uint8Array> {
+): Promise<TranscriptionOutput> {
   // Load model
   onProgress?.({ stage: 'loading', progress: 0, message: 'Loading model...' });
   await loadBasicPitchModel();
@@ -57,7 +62,7 @@ export async function transcribeAudio(
 
   onProgress?.({ stage: 'done', progress: 100, message: 'Transcription complete!' });
 
-  return midiData;
+  return { midiData, transcriptionResult: result };
 }
 
 export function downloadMidi(midiData: Uint8Array, filename: string = 'transcription.mid'): void {
@@ -80,3 +85,11 @@ export function downloadMidi(midiData: Uint8Array, filename: string = 'transcrip
 
 export type { TranscriptionResult } from './postprocess';
 export type { MidiNote } from './postprocess';
+
+// Re-export karaoke JSON utilities
+export { 
+  generateKaraokeJSON, 
+  exportKaraokeJSON, 
+  downloadKaraokeJSON 
+} from './karaokeJSON';
+export type { KaraokeNote, KaraokePhrase, KaraokeJSON } from './karaokeJSON';
